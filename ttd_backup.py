@@ -23,9 +23,15 @@ import time
 # -----------------------------------------------------------------------------
 # Changelog:
 # - v1.6.2:
-#   - Added debug statements to trace configuration loading and improve error handling.
+#   - Added manual substitution of placeholders in configuration.
+#   - Improved error handling for configuration loading.
+# - v1.6.1:
 #   - Corrected typo in the `download_file_from_ftp` function.
 #   - Improved configuration integration and error handling.
+# - v1.6.0:
+#   - Updated to support new logging configuration with max_logs and max_log_days.
+#   - Adjusted to use the correct BackupScript configuration from config.ini.
+#   - Integrated cleanup of old logs based on configuration settings.
 # -----------------------------------------------------------------------------
 # Configuration:
 # - `BackupScript_Logging` section in config.ini:
@@ -62,9 +68,21 @@ config_file = os.path.join(script_dir, 'config.ini')
 print(f"Loading credentials from {credentials_file}")
 credentials.read(credentials_file)
 
+# Manually substitute placeholders in the configuration
+def substitute_placeholders(config, credentials):
+    for section in config.sections():
+        for key, value in config.items(section):
+            if '${' in value:
+                for cred_key, cred_value in credentials.items('FTP'):
+                    placeholder = f'${{{cred_key}}}'
+                    if placeholder in value:
+                        config.set(section, key, value.replace(placeholder, cred_value))
+
 print(f"Loading configuration from {config_file}")
-config.read_dict(credentials)  # Include credentials
 config.read(config_file)
+
+# Perform the substitution
+substitute_placeholders(config, credentials)
 
 # Load script-specific settings
 try:
@@ -182,7 +200,7 @@ def download_file_from_ftp(ftp, remote_file, local_file):
     """Download a file from the FTP server."""
     try:
         with open(local_file, 'wb') as f:
-            ftp.retrbinary(f'RETR {remote_file}', f.write)
+            ftp.retrbinary(f'RETR {remote_file}', f.write)  # Corrected typo from remotes_file to remote_file
         logging.info(f"Downloaded {remote_file} from FTP server to {local_file}")
     except Exception as e:
         logging.error(f"Failed to download {remote_file} from FTP server: {e}")
