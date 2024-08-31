@@ -1,8 +1,18 @@
+import os
+import logging
+import shutil
+import hashlib
+from ftplib import FTP, error_perm
+import configparser
+from datetime import datetime, timedelta
+import requests
+import time
+
 # -----------------------------------------------------------------------------
 # Script Information
 # -----------------------------------------------------------------------------
 # Script Name: FTP Upload with Compression, Integrity Check, and Notifications Script
-# Version: v1.6.0
+# Version: v1.6.2
 # Author: Quentin King
 # Date: 08-31-2024
 # Description: This script compresses a specified directory into a ZIP file, uploads it to
@@ -12,18 +22,10 @@
 #              that include the date and time of the script execution.
 # -----------------------------------------------------------------------------
 # Changelog:
-# - v1.6.0:
-#   - Updated to support new logging configuration with max_logs and max_log_days.
-#   - Adjusted to use the correct BackupScript configuration from config.ini.
-#   - Integrated cleanup of old logs based on configuration settings.
-# - v1.5.4:
-#   - Added log file retention management. Logs will be deleted based on maximum number
-#     of log files and/or maximum log file age, whichever comes first.
-# - v1.5.3:
-#   - Added retry logic for handling MD5 mismatches. If a mismatch occurs, the script will
-#     delete the mismatched file, retry the upload once, and verify the integrity again.
-#     If a second mismatch occurs, the script will log detailed information, send a Pushover
-#     notification, and halt further operations.
+# - v1.6.2:
+#   - Added debug statements to trace configuration loading and improve error handling.
+#   - Corrected typo in the `download_file_from_ftp` function.
+#   - Improved configuration integration and error handling.
 # -----------------------------------------------------------------------------
 # Configuration:
 # - `BackupScript_Logging` section in config.ini:
@@ -46,16 +48,6 @@
 #   - `rate_limit_seconds`: Rate limiting interval for Pushover notifications (in seconds).
 # -----------------------------------------------------------------------------
 
-import os
-import logging
-import shutil
-import hashlib
-from ftplib import FTP, error_perm
-import configparser
-from datetime import datetime, timedelta
-import requests
-import time
-
 # Determine the directory of the current script
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -64,31 +56,48 @@ config = configparser.ConfigParser()
 
 # Load credentials.ini first to resolve placeholders
 credentials = configparser.ConfigParser()
-credentials.read(os.path.join(script_dir, 'credentials.ini'))
+credentials_file = os.path.join(script_dir, 'credentials.ini')
+config_file = os.path.join(script_dir, 'config.ini')
 
-# Load config.ini, resolving placeholders with credentials
+print(f"Loading credentials from {credentials_file}")
+credentials.read(credentials_file)
+
+print(f"Loading configuration from {config_file}")
 config.read_dict(credentials)  # Include credentials
-config.read(os.path.join(script_dir, 'config.ini'))
+config.read(config_file)
 
 # Load script-specific settings
-log_directory = config.get('BackupScript_Logging', 'log_dir')
-log_directory = os.path.join(script_dir, log_directory)  # Ensure the log directory is relative to the script's location
-max_logs = config.getint('BackupScript_Logging', 'max_logs', fallback=10)
-max_log_days = config.getint('BackupScript_Logging', 'max_log_days', fallback=10)
+try:
+    log_directory = config.get('BackupScript_Logging', 'log_dir')
+    log_directory = os.path.join(script_dir, log_directory)  # Ensure the log directory is relative to the script's location
+    max_logs = config.getint('BackupScript_Logging', 'max_logs', fallback=10)
+    max_log_days = config.getint('BackupScript_Logging', 'max_log_days', fallback=10)
 
-source_directory = config.get('BackupScript_Backup', 'source_directory')
-temp_directory = config.get('BackupScript_Backup', 'temp_directory')
-backup_retention_count = config.getint('BackupScript_Backup', 'retention_count', fallback=10)
-backup_retention_days = config.getint('BackupScript_Backup', 'retention_days', fallback=10)
+    source_directory = config.get('BackupScript_Backup', 'source_directory')
+    temp_directory = config.get('BackupScript_Backup', 'temp_directory')
+    backup_retention_count = config.getint('BackupScript_Backup', 'retention_count', fallback=10)
+    backup_retention_days = config.getint('BackupScript_Backup', 'retention_days', fallback=10)
 
-ftp_server = config.get('BackupScript_FTP', 'server')
-ftp_port = config.getint('BackupScript_FTP', 'port')
-ftp_user = config.get('BackupScript_FTP', 'user')
-ftp_pass = config.get('BackupScript_FTP', 'pass')
+    ftp_server = config.get('BackupScript_FTP', 'server')
+    ftp_port = config.getint('BackupScript_FTP', 'port')
+    ftp_user = config.get('BackupScript_FTP', 'user')
+    ftp_pass = config.get('BackupScript_FTP', 'pass')
 
-pushover_token = config.get('BackupScript_Pushover', 'token')
-pushover_user = config.get('BackupScript_Pushover', 'user')
-pushover_rate_limit = config.getint('BackupScript_Pushover', 'rate_limit_seconds', fallback=300)
+    pushover_token = config.get('BackupScript_Pushover', 'token')
+    pushover_user = config.get('BackupScript_Pushover', 'user')
+    pushover_rate_limit = config.getint('BackupScript_Pushover', 'rate_limit_seconds', fallback=300)
+
+    print("Configuration loaded successfully.")
+
+except configparser.NoSectionError as e:
+    print(f"Configuration error: {e}")
+    raise
+except configparser.NoOptionError as e:
+    print(f"Configuration option error: {e}")
+    raise
+except Exception as e:
+    print(f"Unexpected error loading configuration: {e}")
+    raise
 
 # Set up logging with a new file for each run in a subdirectory
 if not os.path.exists(log_directory):
@@ -173,7 +182,7 @@ def download_file_from_ftp(ftp, remote_file, local_file):
     """Download a file from the FTP server."""
     try:
         with open(local_file, 'wb') as f:
-            ftp.retrbinary(f'RETR {remotes_file}', f.write)
+            ftp.retrbinary(f'RETR {remote_file}', f.write)
         logging.info(f"Downloaded {remote_file} from FTP server to {local_file}")
     except Exception as e:
         logging.error(f"Failed to download {remote_file} from FTP server: {e}")
@@ -208,7 +217,7 @@ def upload_file_to_ftp(ftp, local_file, remote_file, retries=1):
                 os.remove(downloaded_file)
                 attempt += 1
                 if attempt <= retries:
-                    logging.warning(f"Retrying upload and verification for {local_file} (Attempt {attempt})")
+                    logging.warning(f"Retrying upload and verification for {local_file} (Attempt {attempt + 1})")
                 else:
                     break
 
