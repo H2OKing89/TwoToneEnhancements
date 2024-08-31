@@ -12,7 +12,7 @@ import time
 # Script Information
 # -----------------------------------------------------------------------------
 # Script Name: FTP Upload with Compression, Integrity Check, and Notifications Script
-# Version: v1.6.3
+# Version: v1.6.4
 # Author: Quentin King
 # Date: 08-31-2024
 # Description: This script compresses a specified directory into a ZIP file, uploads it to
@@ -22,12 +22,9 @@ import time
 #              that include the date and time of the script execution.
 # -----------------------------------------------------------------------------
 # Changelog:
-# - v1.6.3:
-#   - Ensured placeholder substitution for configuration values.
-#   - Improved error handling for configuration loading.
-# - v1.6.2:
-#   - Added manual substitution of placeholders in configuration.
-#   - Improved error handling for configuration loading.
+# - v1.6.4:
+#   - Added explicit substitution for integer placeholders.
+#   - Improved configuration substitution logic.
 # -----------------------------------------------------------------------------
 # Configuration:
 # - `BackupScript_Logging` section in config.ini:
@@ -86,22 +83,22 @@ substitute_placeholders(config, credentials)
 try:
     log_directory = config.get('BackupScript_Logging', 'log_dir')
     log_directory = os.path.join(script_dir, log_directory)  # Ensure the log directory is relative to the script's location
-    max_logs = config.getint('BackupScript_Logging', 'max_logs', fallback=10)
-    max_log_days = config.getint('BackupScript_Logging', 'max_log_days', fallback=10)
+    max_logs = int(config.get('BackupScript_Logging', 'max_logs', fallback='10'))
+    max_log_days = int(config.get('BackupScript_Logging', 'max_log_days', fallback='10'))
 
     source_directory = config.get('BackupScript_Backup', 'source_directory')
     temp_directory = config.get('BackupScript_Backup', 'temp_directory')
-    backup_retention_count = config.getint('BackupScript_Backup', 'retention_count', fallback=10)
-    backup_retention_days = config.getint('BackupScript_Backup', 'retention_days', fallback=10)
+    backup_retention_count = int(config.get('BackupScript_Backup', 'retention_count', fallback='10'))
+    backup_retention_days = int(config.get('BackupScript_Backup', 'retention_days', fallback='10'))
 
     ftp_server = config.get('BackupScript_FTP', 'server')
-    ftp_port = config.getint('BackupScript_FTP', 'port')
+    ftp_port = int(config.get('BackupScript_FTP', 'port'))  # Explicitly convert the substituted value to int
     ftp_user = config.get('BackupScript_FTP', 'user')
     ftp_pass = config.get('BackupScript_FTP', 'pass')
 
     pushover_token = config.get('BackupScript_Pushover', 'token')
     pushover_user = config.get('BackupScript_Pushover', 'user')
-    pushover_rate_limit = config.getint('BackupScript_Pushover', 'rate_limit_seconds', fallback=300)
+    pushover_rate_limit = int(config.get('BackupScript_Pushover', 'rate_limit_seconds', fallback='300'))
 
     print("Configuration loaded successfully.")
 
