@@ -2,7 +2,7 @@
 # Script Information
 # -----------------------------------------------------------------------------
 # Script Name: FTP Upload with Compression, Integrity Check, and Notifications Script
-# Version: v1.5.4
+# Version: v1.6.0
 # Author: Quentin King
 # Date: 08-31-2024
 # Description: This script compresses a specified directory into a ZIP file, uploads it to
@@ -12,6 +12,10 @@
 #              that include the date and time of the script execution.
 # -----------------------------------------------------------------------------
 # Changelog:
+# - v1.6.0:
+#   - Updated to support new logging configuration with max_logs and max_log_days.
+#   - Adjusted to use the correct BackupScript configuration from config.ini.
+#   - Integrated cleanup of old logs based on configuration settings.
 # - v1.5.4:
 #   - Added log file retention management. Logs will be deleted based on maximum number
 #     of log files and/or maximum log file age, whichever comes first.
@@ -55,17 +59,20 @@ import time
 # Determine the directory of the current script
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
-# Load configuration from a file in the same directory as the script
-config_file_path = os.path.join(script_dir, 'config.ini')
+# Load configuration from the INI files
 config = configparser.ConfigParser()
-config.read(config_file_path)
+
+# Load credentials.ini first to resolve placeholders
+credentials = configparser.ConfigParser()
+credentials.read(os.path.join(script_dir, 'credentials.ini'))
+
+# Load config.ini, resolving placeholders with credentials
+config.read_dict(credentials)  # Include credentials
+config.read(os.path.join(script_dir, 'config.ini'))
 
 # Load script-specific settings
 log_directory = config.get('BackupScript_Logging', 'log_dir')
-
-# Ensure the log directory is relative to the script's location
-log_directory = os.path.join(script_dir, log_directory)
-
+log_directory = os.path.join(script_dir, log_directory)  # Ensure the log directory is relative to the script's location
 max_logs = config.getint('BackupScript_Logging', 'max_logs', fallback=10)
 max_log_days = config.getint('BackupScript_Logging', 'max_log_days', fallback=10)
 
@@ -87,7 +94,7 @@ pushover_rate_limit = config.getint('BackupScript_Pushover', 'rate_limit_seconds
 if not os.path.exists(log_directory):
     os.makedirs(log_directory)
 
-current_time = datetime.now().strftime('%m-%d-%Y_%H-%M-%S')
+current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
 log_file = os.path.join(log_directory, f'ftp_upload_{current_time}.log')
 
 logging.basicConfig(
@@ -166,7 +173,7 @@ def download_file_from_ftp(ftp, remote_file, local_file):
     """Download a file from the FTP server."""
     try:
         with open(local_file, 'wb') as f:
-            ftp.retrbinary(f'RETR {remote_file}', f.write)
+            ftp.retrbinary(f'RETR {remotes_file}', f.write)
         logging.info(f"Downloaded {remote_file} from FTP server to {local_file}")
     except Exception as e:
         logging.error(f"Failed to download {remote_file} from FTP server: {e}")
@@ -276,7 +283,7 @@ def manage_log_retention(log_dir, max_logs, max_days):
 
 def main():
     """Main function to handle directory compression, file upload, integrity check, and retention management."""
-    zip_file_path = os.path.join(temp_directory, 'TTD_Backup_' + datetime.now().strftime('%m-%d-%Y_%H-%M-%S') + '.zip')
+    zip_file_path = os.path.join(temp_directory, 'TTD_Backup_' + datetime.now().strftime('%Y%m%d_%H%M%S') + '.zip')
     
     try:
         compress_directory_to_zip(source_directory, zip_file_path)
