@@ -2,36 +2,36 @@
 # Script Information
 # -----------------------------------------------------------------------------
 # Script Name: TwoToneDetect Pre-Notification
-# Version: v1.7.1
+# Version: v1.8.0
 # Author: Quentin King
-# Date: 08-28-2024
+# Date: 08-31-2024
 # Description: This script sends a pre-notification webhook to Node-RED with 
 #              the audio file URL and relevant details. Includes error handling, 
 #              Pushover notifications for failures, and retry mechanisms with 
 #              exponential backoff. Configuration settings are loaded from 
 #              separate INI files (config.ini and pushover.ini).
 # Changelog:
+# - v1.8.0: Updated to support new logging configuration with max_logs and max_log_days.
+#           Adjusted to use the correct ttd_pre_notification configuration from config.ini.
 # - v1.7.1: Updated log file naming convention, removed "webhook" from the filename.
 # - v1.7.0: Updated to read from separate config.ini and pushover.ini files.
 #           Enhanced error handling and updated logging configuration.
-# - v1.6.1: Updated log file naming convention, added detailed comments and 
-#           docstrings, improved error handling and retry mechanism.
-# - v1.6.0: Implemented configuration via config.ini, integrated Pushover 
-#           notifications, and added exponential backoff for retries.
 # -----------------------------------------------------------------------------
 
 import configparser
 import os
 import logging
+from logging.handlers import RotatingFileHandler
 import requests
 import sys
 import argparse
 from time import sleep
+from datetime import datetime
 
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-# Load configuration from the ini files
+# Load configuration from the INI files
 config = configparser.ConfigParser()
 
 # Assuming all INI files are in the same directory as this script
@@ -48,23 +48,43 @@ pushover_app_token = config['Pushover']['PUSHOVER_TOKEN']
 pushover_user_key = config['Pushover']['PUSHOVER_USER']
 
 # Access the Webhook and base audio URL from config.ini
-webhook_url = config['Webhook']['tone_detected_url']
-base_audio_url = config['Webhook']['base_audio_url']
+webhook_url = config['ttd_pre_notification_Webhook']['ttd_pre_notification_url']
+base_audio_url = config['ttd_pre_notification_Webhook']['base_audio_url']
 
-# Set up logging
-log_directory = os.path.join(script_dir, config['Logging']['log_dir'])
-cleanup_days = int(config['Logging']['cleanup_days'])
+# Set up logging configuration
+log_config_section = 'ttd_pre_notification_Logging'
+log_dir = config.get(log_config_section, 'log_dir')
+log_level = config.get(log_config_section, 'log_level', fallback='INFO').upper()
+max_logs = int(config.get(log_config_section, 'max_logs', fallback=10))
+max_log_days = int(config.get(log_config_section, 'max_log_days', fallback=10))
 
-if not os.path.exists(log_directory):
-    os.makedirs(log_directory)
+# Create subdirectory for logs if it doesn't exist
+if not os.path.exists(log_dir):
+    os.makedirs(log_dir)
 
-# Log file with updated naming convention (removed "webhook" from the filename)
-log_file = os.path.join(log_directory, 'ttd_pre_notification.log')
+# Generate a unique log file name for each run
+log_file = os.path.join(log_dir, f"ttd_pre_notification_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+
+# Configure logging
 logging.basicConfig(
-    filename=log_file,
-    level=config.get('Logging', 'log_level', fallback='INFO').upper(),
+    handlers=[RotatingFileHandler(log_file, maxBytes=1048576, backupCount=max_logs)],
+    level=getattr(logging, log_level),
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
+
+# Function to clean up old logs
+def cleanup_logs():
+    now = datetime.now()
+    for filename in os.listdir(log_dir):
+        file_path = os.path.join(log_dir, filename)
+        if os.path.isfile(file_path):
+            file_age_days = (now - datetime.fromtimestamp(os.path.getmtime(file_path))).days
+            if file_age_days > max_log_days:
+                os.remove(file_path)
+                logging.info(f"Deleted old log file: {filename}")
+
+# Run cleanup
+cleanup_logs()
 
 # -----------------------------------------------------------------------------
 # Function: send_webhook
