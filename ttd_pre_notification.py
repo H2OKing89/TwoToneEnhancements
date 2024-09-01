@@ -1,16 +1,29 @@
+import configparser
+import os
+import logging
+from logging.handlers import RotatingFileHandler
+import requests
+import sys
+import argparse
+from time import sleep
+from datetime import datetime
+
 # -----------------------------------------------------------------------------
 # Script Information
 # -----------------------------------------------------------------------------
 # Script Name: ttd_pre_notification.py
-# Version: v1.7.2
+# Version: v1.7.3
 # Author: Quentin King
-# Date: 08-31-2024
+# Date: 09-01-2024
 # Description: This script sends a pre-notification webhook to Node-RED with 
 #              the audio file URL and relevant details. It includes error 
 #              handling, Pushover notifications for failures, and retry 
 #              mechanisms with exponential backoff. Configuration settings are 
 #              loaded from shared INI files for flexibility and ease of use.
 # Changelog:
+# - v1.7.3: Updated log naming to match the desired format, ensured all logs 
+#           are rotated correctly, and removed outdated log files exceeding 
+#           the retention period.
 # - v1.7.2: Added extensive logging for debugging, ensured paths for logs and 
 #           temp files are relative to the script's directory.
 # - v1.7.1: Updated paths for config.ini and credentials.ini to be relative 
@@ -19,15 +32,6 @@
 #           included all adjustable Pushover settings, and reorganized 
 #           configuration files to improve usability.
 # -----------------------------------------------------------------------------
-
-import configparser
-import os
-import logging
-import requests
-import sys
-import argparse
-from time import sleep
-from datetime import datetime
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -47,7 +51,7 @@ config.read([config_path, credentials_path])
 log_dir = os.path.join(script_dir, config['ttd_pre_notification_Logging']['log_dir'])
 log_level = config['ttd_pre_notification_Logging']['log_level']
 max_logs = int(config['ttd_pre_notification_Logging']['max_logs'])
-max_log_days = int(config['ttd_pre_notification_Logging']['max_log_days'])
+max_log_size = int(config['ttd_pre_notification_Logging']['max_log_size'])
 log_to_console = config.getboolean('ttd_pre_notification_Logging', 'log_to_console')
 verbose_logging = config.getboolean('ttd_pre_notification_Logging', 'verbose_logging')
 
@@ -55,20 +59,25 @@ verbose_logging = config.getboolean('ttd_pre_notification_Logging', 'verbose_log
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 
-# Configure logging
-log_file_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+# Configure rotating file handler for logging
+log_file_name = f"pre_notification_{datetime.now().strftime('%m-%d-%Y_%H-%M-%S')}.log"
 log_file_path = os.path.join(log_dir, log_file_name)
 
+handler = RotatingFileHandler(
+    log_file_path, maxBytes=max_log_size, backupCount=max_logs
+)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+
 logging.basicConfig(
-    filename=log_file_path,
     level=getattr(logging, log_level.upper(), logging.DEBUG),
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    handlers=[handler]
 )
 
 if log_to_console:
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(getattr(logging, log_level.upper(), logging.DEBUG))
-    console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    console_handler.setFormatter(formatter)
     logging.getLogger().addHandler(console_handler)
 
 logging.info("Logging initialized.")
