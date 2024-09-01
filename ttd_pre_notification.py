@@ -1,27 +1,28 @@
 # -----------------------------------------------------------------------------
 # Script Information
 # -----------------------------------------------------------------------------
-# Script Name: TwoToneDetect Pre-Notification
-# Version: v1.8.0
+# Script Name: ttd_pre_notification.py
+# Version: v1.7.2
 # Author: Quentin King
 # Date: 08-31-2024
 # Description: This script sends a pre-notification webhook to Node-RED with 
-#              the audio file URL and relevant details. Includes error handling, 
-#              Pushover notifications for failures, and retry mechanisms with 
-#              exponential backoff. Configuration settings are loaded from 
-#              separate INI files (config.ini and pushover.ini).
+#              the audio file URL and relevant details. It includes error 
+#              handling, Pushover notifications for failures, and retry 
+#              mechanisms with exponential backoff. Configuration settings are 
+#              loaded from shared INI files for flexibility and ease of use.
 # Changelog:
-# - v1.8.0: Updated to support new logging configuration with max_logs and max_log_days.
-#           Adjusted to use the correct ttd_pre_notification configuration from config.ini.
-# - v1.7.1: Updated log file naming convention, removed "webhook" from the filename.
-# - v1.7.0: Updated to read from separate config.ini and pushover.ini files.
-#           Enhanced error handling and updated logging configuration.
+# - v1.7.2: Added extensive logging for debugging, ensured paths for logs and 
+#           temp files are relative to the script's directory.
+# - v1.7.1: Updated paths for config.ini and credentials.ini to be relative 
+#           to the script's directory, improving portability.
+# - v1.7.0: Moved additional variables to config.ini, added log levels, 
+#           included all adjustable Pushover settings, and reorganized 
+#           configuration files to improve usability.
 # -----------------------------------------------------------------------------
 
 import configparser
 import os
 import logging
-from logging.handlers import RotatingFileHandler
 import requests
 import sys
 import argparse
@@ -31,67 +32,96 @@ from datetime import datetime
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-# Load configuration from the INI files
-config = configparser.ConfigParser()
-
-# Assuming all INI files are in the same directory as this script
+# Get the directory where the script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
-# Load config.ini and pushover.ini
-config.read([
-    os.path.join(script_dir, 'config.ini'),
-    os.path.join(script_dir, 'pushover.ini')
-])
+# Define relative paths to the config.ini and credentials.ini files
+config_path = os.path.join(script_dir, 'config.ini')
+credentials_path = os.path.join(script_dir, 'credentials.ini')
 
-# Access the Pushover credentials
-pushover_app_token = config['Pushover']['PUSHOVER_TOKEN']
-pushover_user_key = config['Pushover']['PUSHOVER_USER']
+# Load configuration from the config.ini and credentials.ini files
+config = configparser.ConfigParser()
+config.read([config_path, credentials_path])
 
-# Access the Webhook and base audio URL from config.ini
-webhook_url = config['ttd_pre_notification_Webhook']['ttd_pre_notification_url']
-base_audio_url = config['ttd_pre_notification_Webhook']['base_audio_url']
+# Access the Logging configuration
+log_dir = os.path.join(script_dir, config['ttd_pre_notification_Logging']['log_dir'])
+log_level = config['ttd_pre_notification_Logging']['log_level']
+max_logs = int(config['ttd_pre_notification_Logging']['max_logs'])
+max_log_days = int(config['ttd_pre_notification_Logging']['max_log_days'])
+log_to_console = config.getboolean('ttd_pre_notification_Logging', 'log_to_console')
+verbose_logging = config.getboolean('ttd_pre_notification_Logging', 'verbose_logging')
 
-# Set up logging configuration
-log_config_section = 'ttd_pre_notification_Logging'
-log_dir = config.get(log_config_section, 'log_dir')
-log_level = config.get(log_config_section, 'log_level', fallback='INFO').upper()
-max_logs = int(config.get(log_config_section, 'max_logs', fallback=10))
-max_log_days = int(config.get(log_config_section, 'max_log_days', fallback=10))
-
-# Create subdirectory for logs if it doesn't exist
+# Ensure the log directory exists
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 
-# Generate a unique log file name for each run
-log_file = os.path.join(log_dir, f"ttd_pre_notification_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
-
 # Configure logging
+log_file_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+log_file_path = os.path.join(log_dir, log_file_name)
+
 logging.basicConfig(
-    handlers=[RotatingFileHandler(log_file, maxBytes=1048576, backupCount=max_logs)],
-    level=getattr(logging, log_level),
+    filename=log_file_path,
+    level=getattr(logging, log_level.upper(), logging.DEBUG),
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# Function to clean up old logs
-def cleanup_logs():
-    now = datetime.now()
-    for filename in os.listdir(log_dir):
-        file_path = os.path.join(log_dir, filename)
-        if os.path.isfile(file_path):
-            file_age_days = (now - datetime.fromtimestamp(os.path.getmtime(file_path))).days
-            if file_age_days > max_log_days:
-                os.remove(file_path)
-                logging.info(f"Deleted old log file: {filename}")
+if log_to_console:
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(getattr(logging, log_level.upper(), logging.DEBUG))
+    console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logging.getLogger().addHandler(console_handler)
 
-# Run cleanup
-cleanup_logs()
+logging.info("Logging initialized.")
+logging.info(f"Logs will be stored in: {log_dir}")
+logging.info(f"Log file: {log_file_name}")
+
+# Access the Pushover credentials and settings
+pushover_app_token = config['ttd_pre_notification_Credentials']['pushover_token']
+pushover_user_key = config['ttd_pre_notification_Credentials']['pushover_user']
+pushover_priority = int(config['ttd_pre_notification_Pushover']['priority'])
+pushover_retry = int(config['ttd_pre_notification_Pushover']['retry'])
+pushover_expire = int(config['ttd_pre_notification_Pushover']['expire'])
+pushover_sound = config['ttd_pre_notification_Pushover']['sound']
+
+logging.info("Pushover settings loaded.")
+
+# Access the Webhook and base audio URL
+webhook_url = config['ttd_pre_notification_Webhook']['tone_detected_url']
+base_audio_url = config['ttd_pre_notification_Webhook']['base_audio_url']
+secondary_webhook_url = config['ttd_pre_notification_Webhook']['secondary_webhook_url']
+timeout_seconds = int(config['ttd_pre_notification_Webhook']['timeout_seconds'])
+
+logging.info("Webhook settings loaded.")
+
+# Access the Retry logic settings
+max_retries = int(config['ttd_pre_notification_Retry']['max_retries'])
+initial_backoff = int(config['ttd_pre_notification_Retry']['initial_backoff'])
+backoff_multiplier = int(config['ttd_pre_notification_Retry']['backoff_multiplier'])
+
+logging.info("Retry logic settings loaded.")
+
+# Access the File Handling settings
+temp_directory = os.path.join(script_dir, config['ttd_pre_notification_FileHandling']['temp_directory'])
+file_name_format = config['ttd_pre_notification_FileHandling']['file_name_format']
+
+# Ensure the temp directory exists
+if not os.path.exists(temp_directory):
+    os.makedirs(temp_directory)
+
+logging.info(f"Temporary files will be stored in: {temp_directory}")
+
+# Access the Notification Content settings
+title_prefix = config['ttd_pre_notification_NotificationContent']['title_prefix']
+message_template = config['ttd_pre_notification_NotificationContent']['message_template']
+
+logging.info("Notification content settings loaded.")
 
 # -----------------------------------------------------------------------------
 # Function: send_webhook
 # Description: Sends a webhook to Node-RED with retry mechanism and tailored 
 #              exception handling. Uses exponential backoff for retries.
 # -----------------------------------------------------------------------------
-def send_webhook(file_name, topic, retries=3):
+def send_webhook(file_name, topic, retries=max_retries):
     """
     Sends a webhook to Node-RED with the audio file URL and relevant details.
 
@@ -102,14 +132,13 @@ def send_webhook(file_name, topic, retries=3):
     Args:
         file_name (str): The name of the audio file to be included in the webhook.
         topic (str): The topic for the webhook and notification.
-        retries (int): Number of retry attempts for sending the webhook (default is 3).
+        retries (int): Number of retry attempts for sending the webhook (default is max_retries).
 
     Returns:
         bool: True if the webhook was sent successfully, False otherwise.
     """
-    file_name = os.path.basename(file_name)  # Extract the file name
-    file_url = f"{base_audio_url}{file_name}"  # Construct the full URL
-    
+    formatted_file_name = os.path.basename(file_name)  # Extract the file name
+    file_url = f"{base_audio_url}{formatted_file_name}"  # Construct the full URL
     payload = {
         "payload": {
             "message": file_url,
@@ -118,20 +147,22 @@ def send_webhook(file_name, topic, retries=3):
         }
     }
 
+    logging.info(f"Webhook payload: {payload}")
+
     attempt = 0
-    backoff_time = 5  # Initial backoff time in seconds
+    backoff_time = initial_backoff
 
     while attempt < retries:
         try:
-            response = requests.post(webhook_url, json=payload)
+            logging.info(f"Attempt {attempt + 1} to send webhook.")
+            response = requests.post(webhook_url, json=payload, timeout=timeout_seconds)
             response.raise_for_status()  # Raise an HTTPError for bad responses
             logging.info(f"Webhook sent successfully: {payload}")
             return True
-        
+
         except requests.exceptions.ConnectionError as conn_err:
             logging.error(f"Attempt {attempt + 1}: Connection Error: {conn_err}")
             send_error_notification(f"Connection error encountered: {conn_err}")
-            # Immediate retry without waiting for connection issues
             if attempt < retries - 1:
                 logging.info("Retrying immediately due to connection error...")
                 sleep(1)
@@ -141,35 +172,31 @@ def send_webhook(file_name, topic, retries=3):
         except requests.exceptions.Timeout as timeout_err:
             logging.error(f"Attempt {attempt + 1}: Timeout Error: {timeout_err}")
             send_error_notification(f"Timeout error encountered: {timeout_err}")
-            # Exponential backoff for timeouts
             if attempt < retries - 1:
                 logging.info(f"Retrying in {backoff_time} seconds due to timeout...")
                 sleep(backoff_time)
-                backoff_time *= 2
+                backoff_time *= backoff_multiplier
         
         except requests.exceptions.HTTPError as http_err:
             logging.error(f"Attempt {attempt + 1}: HTTP Error: {http_err}")
             send_error_notification(f"HTTP error encountered: {http_err}")
-            # Retry with exponential backoff for HTTP errors
             if attempt < retries - 1:
                 logging.info(f"Retrying in {backoff_time} seconds due to HTTP error...")
                 sleep(backoff_time)
-                backoff_time *= 2
+                backoff_time *= backoff_multiplier
         
         except requests.exceptions.RequestException as req_err:
-            logging.error(f"Attempt {attempt + 1}: General Webhook Error: {req_err}, "
-                          f"Status Code: {response.status_code if response else 'N/A'}, "
-                          f"Response Content: {response.content if response else 'N/A'}")
+            logging.error(f"Attempt {attempt + 1}: General Webhook Error: {req_err}")
             send_error_notification(f"General webhook error: {req_err}")
-            # Retry with exponential backoff for general errors
             if attempt < retries - 1:
                 logging.info(f"Retrying in {backoff_time} seconds due to general error...")
                 sleep(backoff_time)
-                backoff_time *= 2
-        
+                backoff_time *= backoff_multiplier
+
         attempt += 1
 
     send_error_notification(f"Webhook failed after {retries} attempts.")
+    logging.error("Webhook failed after all retry attempts.")
     return False
 
 # -----------------------------------------------------------------------------
@@ -195,9 +222,10 @@ def send_error_notification(error_message):
         "token": pushover_app_token,
         "user": pushover_user_key,
         "message": error_message,
-        "priority": 2,  # Set priority to 2 for emergency
-        "retry": 60,    # Retry interval in seconds
-        "expire": 3600  # Expiration time in seconds (1 hour)
+        "priority": pushover_priority,
+        "retry": pushover_retry,
+        "expire": pushover_expire,
+        "sound": pushover_sound
     }
     try:
         response = requests.post(pushover_url, data=pushover_data)
@@ -219,7 +247,7 @@ def main():
     parser = argparse.ArgumentParser(description="Send a webhook to Node-RED with audio file details.")
     parser.add_argument('file_name', help="The name of the audio file.")
     parser.add_argument('topic', help="The topic for the webhook and notification.")
-    parser.add_argument('--retries', type=int, default=3, help="Number of retry attempts for sending the webhook.")
+    parser.add_argument('--retries', type=int, default=max_retries, help="Number of retry attempts for sending the webhook.")
     
     args = parser.parse_args()
 
