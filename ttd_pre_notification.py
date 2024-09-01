@@ -23,7 +23,7 @@ from datetime import datetime
 # Changelog:
 # - v1.7.3: Updated log naming to match the desired format, ensured all logs 
 #           are rotated correctly, and removed outdated log files exceeding 
-#           the retention period.
+#           the retention period. Added log cleanup to delete old logs.
 # - v1.7.2: Added extensive logging for debugging, ensured paths for logs and 
 #           temp files are relative to the script's directory.
 # - v1.7.1: Updated paths for config.ini and credentials.ini to be relative 
@@ -53,7 +53,7 @@ log_level = config['ttd_pre_notification_Logging']['log_level']
 max_logs = int(config['ttd_pre_notification_Logging']['max_logs'])
 max_log_size = int(config['ttd_pre_notification_Logging']['max_log_size'])
 log_to_console = config.getboolean('ttd_pre_notification_Logging', 'log_to_console')
-verbose_logging = config.getboolean('ttd_pre_notification_Logging', 'verbose_logging')
+max_log_days = int(config['ttd_pre_notification_Logging'].get('max_log_days', 10))
 
 # Ensure the log directory exists
 if not os.path.exists(log_dir):
@@ -124,6 +124,29 @@ title_prefix = config['ttd_pre_notification_NotificationContent']['title_prefix'
 message_template = config['ttd_pre_notification_NotificationContent']['message_template']
 
 logging.info("Notification content settings loaded.")
+
+# -----------------------------------------------------------------------------
+# Function: cleanup_logs
+# Description: Deletes old log files that exceed the defined retention period.
+# -----------------------------------------------------------------------------
+def cleanup_logs():
+    """
+    Cleans up old log files in the specified directory that are older than the 
+    configured number of days.
+
+    This function deletes log files that are older than the 'max_log_days' 
+    configuration parameter from the 'log_dir' directory.
+
+    Returns:
+        None
+    """
+    now = datetime.now().timestamp()
+    for filename in os.listdir(log_dir):
+        file_path = os.path.join(log_dir, filename)
+        if os.path.isfile(file_path) and now - os.path.getmtime(file_path) > max_log_days * 86400:
+            os.remove(file_path)
+            logging.info(f"Deleted old log file: {filename}")
+
 
 # -----------------------------------------------------------------------------
 # Function: send_webhook
@@ -265,6 +288,9 @@ def main():
 
     if not send_webhook(args.file_name, args.topic, args.retries):
         logging.error("Failed to send webhook after multiple attempts.")
+    
+    # Perform log cleanup after execution
+    cleanup_logs()
 
 if __name__ == "__main__":
     main()
