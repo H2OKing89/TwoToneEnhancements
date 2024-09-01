@@ -1,37 +1,26 @@
-import os
-import logging
-import shutil
-import hashlib
-from ftplib import FTP, error_perm
-import configparser
-from datetime import datetime, timedelta
-import requests
-import time
-
 # -----------------------------------------------------------------------------
 # Script Information
 # -----------------------------------------------------------------------------
 # Script Name: FTP Upload with Compression, Integrity Check, and Notifications Script
-# Version: v1.6.2
+# Version: v1.5.5
 # Author: Quentin King
-# Date: 08-31-2024
+# Date: 09-01-2024
 # Description: This script compresses a specified directory into a ZIP file, uploads it to
 #              an FTP server, verifies the integrity of the upload using MD5 hashing, manages
-#              backup retention on the server (maximum of 10 backups and 10 days), and sends
-#              notifications via Pushover. Logs are created in a subdirectory with filenames 
-#              that include the date and time of the script execution.
+#              backup retention on the server, deletes audio files in a subdirectory, 
+#              and sends notifications via Pushover. Logs are created in a subdirectory with
+#              filenames that include the date and time of the script execution.
 # -----------------------------------------------------------------------------
 # Changelog:
-# - v1.6.2:
-#   - Added manual substitution of placeholders in configuration.
-#   - Improved error handling for configuration loading.
-# - v1.6.1:
-#   - Corrected typo in the `download_file_from_ftp` function.
-#   - Improved configuration integration and error handling.
-# - v1.6.0:
-#   - Updated to support new logging configuration with max_logs and max_log_days.
-#   - Adjusted to use the correct BackupScript configuration from config.ini.
-#   - Integrated cleanup of old logs based on configuration settings.
+# - v1.5.5:
+#   - Modified verification process to download and verify the backup file instead of 
+#     using modification time.
+#   - Fixed issue where ftp was not passed correctly to perform_backup_verification.
+#   - Enhanced error notifications and added execution time logging.
+#   - Added detailed comments and modularized the script further.
+# - v1.5.4:
+#   - Added log file retention management. Logs will be deleted based on maximum number
+#     of log files and/or maximum log file age, whichever comes first.
 # -----------------------------------------------------------------------------
 # Configuration:
 # - `BackupScript_Logging` section in config.ini:
@@ -43,6 +32,7 @@ import time
 #   - `temp_directory`: Directory where the temporary ZIP file will be stored.
 #   - `retention_count`: Maximum number of backups to keep.
 #   - `retention_days`: Maximum age of backups to keep (in days).
+#   - `backup_verification_interval_days`: Interval for re-verifying backups (in days).
 # - `BackupScript_FTP` section in config.ini:
 #   - `server`: FTP server address.
 #   - `port`: FTP server port.
@@ -52,76 +42,62 @@ import time
 #   - `token`: Pushover API token for sending notifications.
 #   - `user`: Pushover user key for sending notifications.
 #   - `rate_limit_seconds`: Rate limiting interval for Pushover notifications (in seconds).
+#   - `priority`: Pushover message priority.
+#   - `retry`: Retry interval for emergency notifications (in seconds).
+#   - `expire`: Expiration time for emergency notifications (in seconds).
+#   - `sound`: Sound to play when notification is received.
 # -----------------------------------------------------------------------------
+
+import os
+import logging
+import shutil
+import hashlib
+from ftplib import FTP, error_perm
+import configparser
+from datetime import datetime, timedelta
+import requests
+import time
+import signal
+import sys
 
 # Determine the directory of the current script
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
-# Load configuration from the INI files
+# Load configuration from a file in the same directory as the script
+config_file_path = os.path.join(script_dir, 'config.ini')
 config = configparser.ConfigParser()
-
-# Load credentials.ini first to resolve placeholders
-credentials = configparser.ConfigParser()
-credentials_file = os.path.join(script_dir, 'credentials.ini')
-config_file = os.path.join(script_dir, 'config.ini')
-
-print(f"Loading credentials from {credentials_file}")
-credentials.read(credentials_file)
-
-# Manually substitute placeholders in the configuration
-def substitute_placeholders(config, credentials):
-    for section in config.sections():
-        for key, value in config.items(section):
-            if '${' in value:
-                for cred_key, cred_value in credentials.items('FTP'):
-                    placeholder = f'${{{cred_key}}}'
-                    if placeholder in value:
-                        config.set(section, key, value.replace(placeholder, cred_value))
-
-print(f"Loading configuration from {config_file}")
-config.read(config_file)
-
-# Perform the substitution
-substitute_placeholders(config, credentials)
+config.read(config_file_path)
 
 # Load script-specific settings
-try:
-    log_directory = config.get('BackupScript_Logging', 'log_dir')
-    log_directory = os.path.join(script_dir, log_directory)  # Ensure the log directory is relative to the script's location
-    max_logs = config.getint('BackupScript_Logging', 'max_logs', fallback=10)
-    max_log_days = config.getint('BackupScript_Logging', 'max_log_days', fallback=10)
+log_directory = config.get('BackupScript_Logging', 'log_dir')
+log_directory = os.path.join(script_dir, log_directory)
+max_logs = config.getint('BackupScript_Logging', 'max_logs', fallback=10)
+max_log_days = config.getint('BackupScript_Logging', 'max_log_days', fallback=10)
 
-    source_directory = config.get('BackupScript_Backup', 'source_directory')
-    temp_directory = config.get('BackupScript_Backup', 'temp_directory')
-    backup_retention_count = config.getint('BackupScript_Backup', 'retention_count', fallback=10)
-    backup_retention_days = config.getint('BackupScript_Backup', 'retention_days', fallback=10)
+source_directory = config.get('BackupScript_Backup', 'source_directory')
+temp_directory = config.get('BackupScript_Backup', 'temp_directory')
+backup_retention_count = config.getint('BackupScript_Backup', 'retention_count', fallback=10)
+backup_retention_days = config.getint('BackupScript_Backup', 'retention_days', fallback=10)
+backup_verification_interval_days = config.getint('BackupScript_Backup', 'backup_verification_interval_days', fallback=7)
 
-    ftp_server = config.get('BackupScript_FTP', 'server')
-    ftp_port = config.getint('BackupScript_FTP', 'port')
-    ftp_user = config.get('BackupScript_FTP', 'user')
-    ftp_pass = config.get('BackupScript_FTP', 'pass')
+ftp_server = config.get('BackupScript_FTP', 'server')
+ftp_port = config.getint('BackupScript_FTP', 'port')
+ftp_user = config.get('BackupScript_FTP', 'user')
+ftp_pass = config.get('BackupScript_FTP', 'pass')
 
-    pushover_token = config.get('BackupScript_Pushover', 'token')
-    pushover_user = config.get('BackupScript_Pushover', 'user')
-    pushover_rate_limit = config.getint('BackupScript_Pushover', 'rate_limit_seconds', fallback=300)
-
-    print("Configuration loaded successfully.")
-
-except configparser.NoSectionError as e:
-    print(f"Configuration error: {e}")
-    raise
-except configparser.NoOptionError as e:
-    print(f"Configuration option error: {e}")
-    raise
-except Exception as e:
-    print(f"Unexpected error loading configuration: {e}")
-    raise
+pushover_token = config.get('BackupScript_Pushover', 'token')
+pushover_user = config.get('BackupScript_Pushover', 'user')
+pushover_rate_limit = config.getint('BackupScript_Pushover', 'rate_limit_seconds', fallback=300)
+pushover_priority = config.getint('BackupScript_Pushover', 'priority', fallback=1)
+pushover_retry = config.getint('BackupScript_Pushover', 'retry', fallback=60)
+pushover_expire = config.getint('BackupScript_Pushover', 'expire', fallback=3600)
+pushover_sound = config.get('BackupScript_Pushover', 'sound', fallback='pushover')
 
 # Set up logging with a new file for each run in a subdirectory
 if not os.path.exists(log_directory):
     os.makedirs(log_directory)
 
-current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
+current_time = datetime.now().strftime('%m-%d-%Y_%H-%M-%S')
 log_file = os.path.join(log_directory, f'ftp_upload_{current_time}.log')
 
 logging.basicConfig(
@@ -133,7 +109,7 @@ logging.basicConfig(
 # Rate limiting for Pushover notifications
 last_pushover_time = 0
 
-def send_pushover_notification(message, title="TTD Backup Script", priority=-1):
+def send_pushover_notification(message, title="TTD Backup Script", priority=pushover_priority):
     """Send a notification to Pushover with rate limiting."""
     global last_pushover_time
     current_time = time.time()
@@ -148,7 +124,10 @@ def send_pushover_notification(message, title="TTD Backup Script", priority=-1):
         "user": pushover_user,
         "message": message,
         "title": title,
-        "priority": priority
+        "priority": priority,
+        "retry": pushover_retry,
+        "expire": pushover_expire,
+        "sound": pushover_sound
     }
 
     try:
@@ -185,6 +164,19 @@ def connect_to_ftp():
         send_pushover_notification(f"FTP connection failed: {e}", priority=1)
         return None
 
+def delete_audio_files(source_dir):
+    """Delete all audio files in the audio subdirectory."""
+    audio_dir = os.path.join(source_dir, 'audio')
+    if os.path.exists(audio_dir):
+        logging.info(f"Deleting audio files in {audio_dir}...")
+        for root, _, files in os.walk(audio_dir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                os.remove(file_path)
+                logging.info(f"Deleted audio file: {file_path}")
+    else:
+        logging.info(f"No audio directory found at {audio_dir} to delete.")
+
 def compress_directory_to_zip(source_dir, output_zip):
     """Compress the source directory into a ZIP file."""
     logging.info(f"Compressing directory {source_dir} into {output_zip}")
@@ -200,7 +192,7 @@ def download_file_from_ftp(ftp, remote_file, local_file):
     """Download a file from the FTP server."""
     try:
         with open(local_file, 'wb') as f:
-            ftp.retrbinary(f'RETR {remote_file}', f.write)  # Corrected typo from remotes_file to remote_file
+            ftp.retrbinary(f'RETR {remote_file}', f.write)
         logging.info(f"Downloaded {remote_file} from FTP server to {local_file}")
     except Exception as e:
         logging.error(f"Failed to download {remote_file} from FTP server: {e}")
@@ -235,7 +227,7 @@ def upload_file_to_ftp(ftp, local_file, remote_file, retries=1):
                 os.remove(downloaded_file)
                 attempt += 1
                 if attempt <= retries:
-                    logging.warning(f"Retrying upload and verification for {local_file} (Attempt {attempt + 1})")
+                    logging.warning(f"Retrying upload and verification for {local_file} (Attempt {attempt})")
                 else:
                     break
 
@@ -308,22 +300,69 @@ def manage_log_retention(log_dir, max_logs, max_days):
         os.remove(os.path.join(log_dir, oldest_log))
         logging.info(f"Deleted old log file based on count: {oldest_log}")
 
+def perform_backup_verification(ftp, remote_file, local_temp_dir):
+    """Verify the integrity of the backup file stored on the FTP server by comparing MD5 hashes."""
+    try:
+        logging.info(f"Verifying integrity of the backup file {remote_file} on FTP server.")
+        
+        # Download the backup file from the FTP server
+        temp_download_path = os.path.join(local_temp_dir, f"{remote_file}_verification")
+        download_file_from_ftp(ftp, remote_file, temp_download_path)
+        
+        # Calculate the MD5 hash of the downloaded file
+        local_md5 = calculate_md5(temp_download_path)
+        remote_md5 = calculate_md5(os.path.join(local_temp_dir, remote_file))
+        
+        if local_md5 == remote_md5:
+            logging.info(f"MD5 hash verification successful for {remote_file}.")
+        else:
+            logging.error(f"MD5 hash verification failed for {remote_file}.")
+            raise ValueError("MD5 hash mismatch during backup verification.")
+        
+        # Clean up the temporary verification file
+        os.remove(temp_download_path)
+        logging.info(f"Temporary verification file {temp_download_path} deleted after verification.")
+    
+    except Exception as e:
+        logging.critical(f"Failed to verify backup integrity: {e}", exc_info=True)
+        send_pushover_notification(f"Backup verification failed for {remote_file}: {e}", priority=1)
+
+def graceful_shutdown(signum, frame):
+    """Handle graceful shutdown on receiving a signal."""
+    logging.info("Received termination signal. Shutting down gracefully...")
+    send_pushover_notification("Backup script terminated gracefully.")
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, graceful_shutdown)
+signal.signal(signal.SIGINT, graceful_shutdown)
+
 def main():
     """Main function to handle directory compression, file upload, integrity check, and retention management."""
-    zip_file_path = os.path.join(temp_directory, 'TTD_Backup_' + datetime.now().strftime('%Y%m%d_%H%M%S') + '.zip')
+    zip_file_path = os.path.join(temp_directory, 'TTD_Backup_' + datetime.now().strftime('%m-%d-%Y_%H-%M-%S') + '.zip')
+    
+    start_time = datetime.now()
     
     try:
+        # Delete audio files before compression
+        delete_audio_files(source_directory)
+        
+        # Compress the directory
         compress_directory_to_zip(source_directory, zip_file_path)
 
+        # Connect to FTP server
         ftp = connect_to_ftp()
         if not ftp:
             logging.critical("FTP connection failed. Exiting.")
             return
 
+        # Upload the file to FTP and verify
         upload_successful = upload_file_to_ftp(ftp, zip_file_path, os.path.basename(zip_file_path))
 
         if upload_successful:
             manage_backup_retention(ftp, '/')
+
+            # Perform verification
+            perform_backup_verification(ftp, os.path.basename(zip_file_path), temp_directory)
 
         try:
             ftp.quit()
@@ -342,6 +381,14 @@ def main():
         if os.path.exists(zip_file_path):
             os.remove(zip_file_path)
             logging.info(f"Temporary file {zip_file_path} deleted.")
+        
+        # Log the script execution time
+        end_time = datetime.now()
+        execution_time = end_time - start_time
+        logging.info(f"Script completed in {execution_time} seconds.")
+
+        # Send final pushover notification on completion
+        send_pushover_notification("Backup script completed successfully.")
 
 if __name__ == "__main__":
     main()
