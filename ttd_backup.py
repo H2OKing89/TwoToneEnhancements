@@ -14,7 +14,7 @@ import sys
 # Script Information
 # -----------------------------------------------------------------------------
 # Script Name: FTP Upload with Compression, Integrity Check, and Notifications Script
-# Version: v1.6.0
+# Version: v1.6.1
 # Author: Quentin King
 # Date: 09-01-2024
 # Description: This script compresses a specified directory into a ZIP file, uploads it to
@@ -24,6 +24,8 @@ import sys
 #              filenames that include the date and time of the script execution.
 # -----------------------------------------------------------------------------
 # Changelog:
+# - v1.6.1:
+#   - Fixed the issue with FTP using the wrong part from the .env file.
 # - v1.6.0:
 #   - Moved sensitive credentials to environment variables for better security.
 #   - Added detailed comments and modularized the script further.
@@ -63,10 +65,10 @@ backup_retention_days = config.getint('BackupScript_Backup', 'retention_days', f
 backup_verification_interval_days = config.getint('BackupScript_Backup', 'backup_verification_interval_days', fallback=7)
 
 # Access FTP credentials from environment variables
-ftp_server = os.getenv('FTP_SERVER')
-ftp_port = int(os.getenv('FTP_PORT'))
-ftp_user = os.getenv('FTP_USER')
-ftp_pass = os.getenv('FTP_PASS')
+ftp_server = os.getenv('BACKUP_FTP_SERVER')
+ftp_port = int(os.getenv('BACKUP_FTP_PORT'))
+ftp_user = os.getenv('BACKUP_FTP_USER')
+ftp_pass = os.getenv('BACKUP_FTP_PASS')
 
 # Access Pushover credentials from environment variables
 pushover_token = os.getenv('PUSHOVER_TOKEN')
