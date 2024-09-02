@@ -146,8 +146,8 @@ cleanup_logs()
 # -----------------------------------------------------------------------------
 # Access the Pushover credentials and settings
 logging.debug("Loading Pushover settings.")
-pushover_app_token = config['ttd_pre_notification_Credentials']['pushover_token']
-pushover_user_key = config['ttd_pre_notification_Credentials']['pushover_user']
+pushover_app_token = config['ttd_pre_notification_Pushover']['pushover_token']
+pushover_user_key = config['ttd_pre_notification_Pushover']['pushover_user']
 pushover_priority = int(config['ttd_pre_notification_Pushover']['priority'])
 pushover_retry = int(config['ttd_pre_notification_Pushover']['retry'])
 pushover_expire = int(config['ttd_pre_notification_Pushover']['expire'])
