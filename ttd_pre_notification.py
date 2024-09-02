@@ -7,12 +7,13 @@ import sys
 import argparse
 from time import sleep
 from datetime import datetime
+from dotenv import load_dotenv
 
 # -----------------------------------------------------------------------------
 # Script Information
 # -----------------------------------------------------------------------------
 # Script Name: ttd_pre_notification.py
-# Version: v1.7.9
+# Version: v1.8.0
 # Author: Quentin King
 # Date: 09-01-2024
 # Description: This script sends a pre-notification webhook to Node-RED with 
@@ -21,9 +22,16 @@ from datetime import datetime
 #              mechanisms with exponential backoff. Configuration settings are 
 #              loaded from shared INI files for flexibility and ease of use.
 # Changelog:
+# - v1.8.0: Moved sensitive credentials to environment variables, updated logging 
+#           configuration, and enhanced error handling in Pushover notifications.
 # - v1.7.9: Fixed issue where cleanup_logs() was called before logging was configured, 
 #           causing an AttributeError. Moved cleanup_logs() call after logging setup.
 # -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# Load Environment Variables
+# -----------------------------------------------------------------------------
+load_dotenv()
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -31,13 +39,12 @@ from datetime import datetime
 # Get the directory where the script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
-# Define relative paths to the config.ini and credentials.ini files
+# Define the path to the config.ini file
 config_path = os.path.join(script_dir, 'config.ini')
-credentials_path = os.path.join(script_dir, 'credentials.ini')
 
-# Load configuration from the config.ini and credentials.ini files
+# Load configuration from the config.ini file
 config = configparser.ConfigParser()
-config.read([config_path, credentials_path])
+config.read(config_path)
 
 # Access the Logging configuration
 log_dir = os.path.join(script_dir, config['ttd_pre_notification_Logging']['log_dir'])
@@ -144,10 +151,10 @@ cleanup_logs()
 # -----------------------------------------------------------------------------
 # Access other configurations
 # -----------------------------------------------------------------------------
-# Access the Pushover credentials and settings
+# Access the Pushover credentials and settings from environment variables
 logging.debug("Loading Pushover settings.")
-pushover_app_token = config['ttd_pre_notification_Pushover']['pushover_token']
-pushover_user_key = config['ttd_pre_notification_Pushover']['pushover_user']
+pushover_app_token = os.getenv('PUSHOVER_TOKEN')
+pushover_user_key = os.getenv('PUSHOVER_USER')
 pushover_priority = int(config['ttd_pre_notification_Pushover']['priority'])
 pushover_retry = int(config['ttd_pre_notification_Pushover']['retry'])
 pushover_expire = int(config['ttd_pre_notification_Pushover']['expire'])

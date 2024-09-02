@@ -1,53 +1,3 @@
-# -----------------------------------------------------------------------------
-# Script Information
-# -----------------------------------------------------------------------------
-# Script Name: FTP Upload with Compression, Integrity Check, and Notifications Script
-# Version: v1.5.5
-# Author: Quentin King
-# Date: 09-01-2024
-# Description: This script compresses a specified directory into a ZIP file, uploads it to
-#              an FTP server, verifies the integrity of the upload using MD5 hashing, manages
-#              backup retention on the server, deletes audio files in a subdirectory, 
-#              and sends notifications via Pushover. Logs are created in a subdirectory with
-#              filenames that include the date and time of the script execution.
-# -----------------------------------------------------------------------------
-# Changelog:
-# - v1.5.5:
-#   - Modified verification process to download and verify the backup file instead of 
-#     using modification time.
-#   - Fixed issue where ftp was not passed correctly to perform_backup_verification.
-#   - Enhanced error notifications and added execution time logging.
-#   - Added detailed comments and modularized the script further.
-# - v1.5.4:
-#   - Added log file retention management. Logs will be deleted based on maximum number
-#     of log files and/or maximum log file age, whichever comes first.
-# -----------------------------------------------------------------------------
-# Configuration:
-# - `BackupScript_Logging` section in config.ini:
-#   - `log_dir`: Directory where logs will be stored (relative to the script's location).
-#   - `max_logs`: Maximum number of log files to keep.
-#   - `max_log_days`: Maximum age of log files (in days).
-# - `BackupScript_Backup` section in config.ini:
-#   - `source_directory`: Directory to be backed up.
-#   - `temp_directory`: Directory where the temporary ZIP file will be stored.
-#   - `retention_count`: Maximum number of backups to keep.
-#   - `retention_days`: Maximum age of backups to keep (in days).
-#   - `backup_verification_interval_days`: Interval for re-verifying backups (in days).
-# - `BackupScript_FTP` section in config.ini:
-#   - `server`: FTP server address.
-#   - `port`: FTP server port.
-#   - `user`: Username for FTP backup.
-#   - `pass`: Password for FTP backup.
-# - `BackupScript_Pushover` section in config.ini:
-#   - `token`: Pushover API token for sending notifications.
-#   - `user`: Pushover user key for sending notifications.
-#   - `rate_limit_seconds`: Rate limiting interval for Pushover notifications (in seconds).
-#   - `priority`: Pushover message priority.
-#   - `retry`: Retry interval for emergency notifications (in seconds).
-#   - `expire`: Expiration time for emergency notifications (in seconds).
-#   - `sound`: Sound to play when notification is received.
-# -----------------------------------------------------------------------------
-
 import os
 import logging
 import shutil
@@ -59,6 +9,38 @@ import requests
 import time
 import signal
 import sys
+
+# -----------------------------------------------------------------------------
+# Script Information
+# -----------------------------------------------------------------------------
+# Script Name: FTP Upload with Compression, Integrity Check, and Notifications Script
+# Version: v1.6.0
+# Author: Quentin King
+# Date: 09-01-2024
+# Description: This script compresses a specified directory into a ZIP file, uploads it to
+#              an FTP server, verifies the integrity of the upload using MD5 hashing, manages
+#              backup retention on the server, deletes audio files in a subdirectory, 
+#              and sends notifications via Pushover. Logs are created in a subdirectory with
+#              filenames that include the date and time of the script execution.
+# -----------------------------------------------------------------------------
+# Changelog:
+# - v1.6.0:
+#   - Moved sensitive credentials to environment variables for better security.
+#   - Added detailed comments and modularized the script further.
+#   - Enhanced error notifications and added execution time logging.
+# - v1.5.5:
+#   - Modified verification process to download and verify the backup file instead of 
+#     using modification time.
+#   - Fixed issue where FTP was not passed correctly to perform_backup_verification.
+#   - Enhanced error notifications and added execution time logging.
+# - v1.5.4:
+#   - Added log file retention management. Logs will be deleted based on maximum number
+#     of log files and/or maximum log file age, whichever comes first.
+# -----------------------------------------------------------------------------
+
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
 
 # Determine the directory of the current script
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -80,13 +62,15 @@ backup_retention_count = config.getint('BackupScript_Backup', 'retention_count',
 backup_retention_days = config.getint('BackupScript_Backup', 'retention_days', fallback=10)
 backup_verification_interval_days = config.getint('BackupScript_Backup', 'backup_verification_interval_days', fallback=7)
 
-ftp_server = config.get('BackupScript_FTP', 'server')
-ftp_port = config.getint('BackupScript_FTP', 'port')
-ftp_user = config.get('BackupScript_FTP', 'user')
-ftp_pass = config.get('BackupScript_FTP', 'pass')
+# Access FTP credentials from environment variables
+ftp_server = os.getenv('FTP_SERVER')
+ftp_port = int(os.getenv('FTP_PORT'))
+ftp_user = os.getenv('FTP_USER')
+ftp_pass = os.getenv('FTP_PASS')
 
-pushover_token = config.get('BackupScript_Pushover', 'token')
-pushover_user = config.get('BackupScript_Pushover', 'user')
+# Access Pushover credentials from environment variables
+pushover_token = os.getenv('PUSHOVER_TOKEN')
+pushover_user = os.getenv('PUSHOVER_USER')
 pushover_rate_limit = config.getint('BackupScript_Pushover', 'rate_limit_seconds', fallback=300)
 pushover_priority = config.getint('BackupScript_Pushover', 'priority', fallback=1)
 pushover_retry = config.getint('BackupScript_Pushover', 'retry', fallback=60)

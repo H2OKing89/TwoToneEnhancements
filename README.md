@@ -1,21 +1,18 @@
-Here’s an updated version of your `README.md` file, with additional information, version updates, and detailed setup instructions tailored for Windows. This should provide a comprehensive guide for anyone looking to get started with your project.
-
----
-
 # TwoToneDetect Python Integration
 
-## Version: 1.2.0  
+## Version: 1.3.0  
 **Date:** 2024-09-01  
 **Author:** Quentin King
 
 ## Project Overview
 
-This project provides Python scripts that extend the functionality of the TwoToneDetect software, which monitors audio from fire department dispatch radios. TwoToneDetect identifies specific tones that correspond to different fire departments and triggers predefined commands. This project includes two primary Python scripts:
+This project provides Python scripts that extend the functionality of the TwoToneDetect software, which monitors audio from fire department dispatch radios. TwoToneDetect identifies specific tones that correspond to different fire departments and triggers predefined commands. This project includes three primary Python scripts:
 
 1. **TwoToneDetect Pre-Notification**: Triggered immediately when tones are detected. It sends a webhook notification with information about the detected tones.
 2. **TwoToneDetect Audio Notification**: Triggered after the dispatch audio has been recorded. This script uploads the audio file to an FTP server, verifies its integrity, and sends a webhook notification with the URL to the file.
+3. **Backup Script**: Manages backup of TwoToneDetect audio files, including logging, performance monitoring, and notification of successful or failed backups.
 
-These scripts are designed to integrate seamlessly with TwoToneDetect and provide enhanced notification and monitoring capabilities.
+These scripts are designed to integrate seamlessly with TwoToneDetect and provide enhanced notification, monitoring, and backup capabilities.
 
 ## Setup Instructions
 
@@ -33,7 +30,9 @@ The scripts rely on two configuration files: `config.ini` and `.env` to manage s
 
 #### **config.ini**
 
-This file handles general configuration settings, including logging, retry mechanisms, file handling, and webhook settings.
+This file handles general configuration settings, including logging, retry mechanisms, file handling, and webhook settings. It has been updated to support new logging paths, the inclusion of Pushover API settings, and FTP credentials moved to `.env` for better security.
+
+**Key sections include:**
 
 ```ini
 # ----------------------------------------------------------------------
@@ -159,9 +158,19 @@ python ttd_audio_notification.py <file_name> <department>
 - **file_name**: The path to the recorded audio file.
 - **department**: The department name associated with the audio file.
 
+#### **Backup Script**
+
+This script manages backup operations, including logging and performance monitoring.
+
+```bash
+python backup_script.py
+```
+
+- **Ensure paths are correctly set** in the `config.ini` to avoid errors during execution.
+
 ### 5. Logging Information
 
-- Logs are stored in the directory specified in the `log_dir` configuration (`logs\ttd_audio_notification_logs\` by default).
+- Logs are stored in the directory specified in the `log_dir` configuration (e.g., `logs\ttd_audio_notification_logs\`).
 - Log files are rotated automatically based on the `max_logs` and `max_log_days` settings.
 - The log file naming convention is `ftp_upload_MM-DD-YYYY_HH-MM-SS.log`.
 
@@ -171,7 +180,15 @@ Versioning is managed within each script, with updates noted in the changelog at
 
 - **TwoToneDetect Pre-Notification**: v1.8.0
 - **TwoToneDetect Audio Notification**: v2.0.0
-- **FTP Upload with Compression, Integrity Check, and Notifications Script**: v1.6.0
+- **Backup Script**: v1.6.0
+
+#### Changelog:
+
+- **Version 1.3.0 (2024-09-01)**:
+  - Moved sensitive credentials to `.env` file for improved security.
+  - Updated `config.ini` with new paths and structured logging directories.
+  - Added inline comments for easier configuration and setup.
+  - Enhanced logging and error handling mechanisms.
 
 ### 7. Security Considerations
 
@@ -202,7 +219,9 @@ Versioning is managed within each script, with updates noted in the changelog at
 ### Running on Windows
 
 - Ensure that Python is properly installed and added to your system’s PATH.
-- The scripts are designed to run seamlessly on Windows, but they should be adaptable for other operating systems with minor adjustments.
+- The scripts are
+
+ designed to run seamlessly on Windows, but they should be adaptable for other operating systems with minor adjustments.
 - The setup and running instructions provided above are tailored specifically for a Windows environment.
 
 ### Future Enhancements
@@ -212,5 +231,3 @@ Versioning is managed within each script, with updates noted in the changelog at
 - **Advanced Logging**: Future versions may include more advanced logging capabilities, including integration with logging services or centralized logging solutions.
 
 ---
-
-This `README.md` file should now provide clear and comprehensive instructions for setting up and running the TwoToneDetect Python integration, particularly for users on Windows. If there’s anything more you’d like to add or adjust, feel free to let me know!
