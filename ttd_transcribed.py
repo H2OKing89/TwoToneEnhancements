@@ -29,11 +29,6 @@ from ratelimit import limits, sleep_and_retry  # Implements rate limiting for AP
 # Transcribes audio files using Whisper AI and sends a webhook to Node-RED
 # with enhanced error handling, logging, retry logic with exponential backoff,
 # asynchronous requests, Pushover notifications, rate limiting, and persistent state recovery.
-# Creation Date: 09-07-2024
-# Description:
-# Transcribes audio files using Whisper AI and sends a webhook to Node-RED
-# with enhanced error handling, logging, retry logic with exponential backoff,
-# asynchronous requests, Pushover notifications, rate limiting, and persistent state recovery.
 # -----------------------------------------------------------------------------
 # Changelog:
 # - v1.8.1 (09-07-2024): 
@@ -64,7 +59,6 @@ from ratelimit import limits, sleep_and_retry  # Implements rate limiting for AP
 
 # -----------------------------------------------------------------------------
 # Load Environment Variables
-# Load Environment Variables
 # -----------------------------------------------------------------------------
 load_dotenv()
 
@@ -79,15 +73,11 @@ config = configparser.ConfigParser()
 config.read([config_path])
 
 # Access logging configuration
-# Access logging configuration
 log_dir = os.path.join(script_dir, config['ttd_transcribed_Logging']['log_dir'])
 log_level = config['ttd_transcribed_Logging']['log_level']
 console_log_level = config.get('ttd_transcribed_Logging', 'console_log_level', fallback='INFO')  # New setting for console log level
 delete_after_process = config.getboolean('ttd_transcribed_FileHandling', 'delete_after_process', fallback=False)
-console_log_level = config.get('ttd_transcribed_Logging', 'console_log_level', fallback='INFO')  # New setting for console log level
-delete_after_process = config.getboolean('ttd_transcribed_FileHandling', 'delete_after_process', fallback=False)
 log_to_console = config.getboolean('ttd_transcribed_Logging', 'log_to_console')
-
 
 # Access Whisper configuration
 model_size = config['ttd_transcribed_Whisper']['model_size']
@@ -118,16 +108,6 @@ pushover_priority = config['ttd_transcribed_Pushover']['priority']
 pushover_rate_limit_seconds = config.getint('ttd_transcribed_Pushover', 'rate_limit_seconds', fallback=300)
 
 # Define base path for audio files
-retry_limit = config.getint('ttd_transcribed_Retry', 'retry_limit', fallback=3)
-retry_delay = config.getint('ttd_transcribed_Retry', 'retry_delay', fallback=5)
-
-# Access Pushover settings with rate limiting
-pushover_token = os.getenv('PUSHOVER_TOKEN')
-pushover_user = os.getenv('PUSHOVER_USER')
-pushover_priority = config['ttd_transcribed_Pushover']['priority']
-pushover_rate_limit_seconds = config.getint('ttd_transcribed_Pushover', 'rate_limit_seconds', fallback=300)
-
-# Define base path for audio files
 base_path = config['ttd_transcribed_audio_Path']['base_path']
 
 # Ensure the log directory and transcript directory exist
@@ -135,8 +115,6 @@ transcript_dir = os.path.join(log_dir, "transcripts")
 persistent_state_path = os.path.join(script_dir, 'persistent_state.json')  # Define persistent_state_path
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
-if not os.path.exists(transcript_dir):
-    os.makedirs(transcript_dir)
 if not os.path.exists(transcript_dir):
     os.makedirs(transcript_dir)
 
@@ -149,8 +127,6 @@ logging.basicConfig(
     filename=log_file_path,
     level=getattr(logging, log_level.upper(), logging.DEBUG),  # File logging level
     format='%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(lineno)d - %(message)s'
-    level=getattr(logging, log_level.upper(), logging.DEBUG),  # File logging level
-    format='%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(lineno)d - %(message)s'
 )
 
 # Console logging configuration
@@ -158,10 +134,7 @@ if log_to_console:
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(getattr(logging, console_log_level.upper(), logging.INFO))  # Console log level
     console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(lineno)d - %(message)s'))
-    console_handler.setLevel(getattr(logging, console_log_level.upper(), logging.INFO))  # Console log level
-    console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(lineno)d - %(message)s'))
     logging.getLogger().addHandler(console_handler)
-
 
 logging.info("Logging initialized.")
 logging.info(f"Logs will be stored in: {log_dir}")
@@ -288,11 +261,7 @@ def transcribe_audio(mp3_file):
 
 # -----------------------------------------------------------------------------
 # Async Function: send_webhook
-# Async Function: send_webhook
 # -----------------------------------------------------------------------------
-@sleep_and_retry
-@limits(calls=1, period=pushover_rate_limit_seconds)  # Rate-limiting for webhook
-async def send_webhook(mp3_file, department, transcription):
 @sleep_and_retry
 @limits(calls=1, period=pushover_rate_limit_seconds)  # Rate-limiting for webhook
 async def send_webhook(mp3_file, department, transcription):
@@ -348,19 +317,12 @@ def send_pushover_notification(title, message):
         response = requests.post("https://api.pushover.net/1/messages.json", data=payload)
         response.raise_for_status()
         logging.info(f"Pushover notification sent successfully: {title}")
-        logging.info(f"Pushover notification sent successfully: {title}")
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to send Pushover notification: {e}")
-        logging.error(f"Failed to send Pushover notification: {e}")
 
 # -----------------------------------------------------------------------------
 # Main Function: process_file
-# Main Function: process_file
 # -----------------------------------------------------------------------------
-async def process_file(mp3_file, department):
-    try:
-        if not os.path.isfile(mp3_file):
-            raise FileNotFoundError(f"MP3 file not found: {mp3_file}")
 async def process_file(mp3_file, department):
     try:
         if not os.path.isfile(mp3_file):
@@ -375,25 +337,6 @@ async def process_file(mp3_file, department):
         with open(transcript_file_path, 'w') as f:
             f.write(transcription)
         logging.info(f"Transcription saved to: {transcript_file_path}")
-        # Transcribe the audio file
-        transcription = transcribe_audio(mp3_file)
-        logging.info(f"Transcription completed for {mp3_file}: {transcription}")
-
-        # Save the transcription to a file
-        transcript_file_path = os.path.join(transcript_dir, f"{os.path.basename(mp3_file)}.txt")
-        with open(transcript_file_path, 'w') as f:
-            f.write(transcription)
-        logging.info(f"Transcription saved to: {transcript_file_path}")
-
-        # Send the transcription via webhook
-        if await send_webhook(mp3_file, department, transcription):
-            if delete_after_process:
-                os.remove(mp3_file)
-                logging.info(f"Deleted processed file: {mp3_file}")
-
-        # Clean up persistent state
-        if os.path.exists(persistent_state_path):
-            os.remove(persistent_state_path)
 
         # Send the transcription via webhook
         if await send_webhook(mp3_file, department, transcription):
@@ -415,35 +358,6 @@ async def process_file(mp3_file, department):
         logging.error(f"Whisper model error: {whisper_error}")
     except Exception as e:
         logging.error(f"Unexpected error: {e}")
-        save_persistent_state({"mp3_file": mp3_file, "department": department})
-        send_pushover_notification("Script Error", f"Unexpected error occurred: {e}")
-
-# -----------------------------------------------------------------------------
-# Main Execution
-# -----------------------------------------------------------------------------
-async def main():
-    logging.debug("Starting ttd_transcribed script.")
-    
-    # Use argparse to handle command-line arguments
-    parser = argparse.ArgumentParser(description="Transcribe audio files and send the result via webhook.")
-    parser.add_argument("mp3_file", type=str, help="The MP3 file to transcribe.")
-    parser.add_argument("department", type=str, help="The department the file belongs to.")
-
-    args = parser.parse_args()
-
-    state = load_persistent_state()
-
-    if state:
-        mp3_file = state['mp3_file']
-        department = state['department']
-        logging.info(f"Resuming transcription for file: {mp3_file}, Department: {department}")
-    else:
-        mp3_file = os.path.join(base_path, args.mp3_file)
-        department = args.department
-        logging.info(f"Processing transcription for file: {mp3_file}, Department: {department}")
-
-    # Now call the processing function
-    await process_file(mp3_file, department)
         save_persistent_state({"mp3_file": mp3_file, "department": department})
         send_pushover_notification("Script Error", f"Unexpected error occurred: {e}")
 
