@@ -35,29 +35,6 @@ from ratelimit import limits, sleep_and_retry
 #   * Added Prometheus custom metrics for success/failure counts (transcription and webhooks).
 #   * Fixed persistent state path handling.
 #   * Updated version control information.
-# - v1.8.1 (09-07-2024): 
-#   * Fixed missing imports and undefined variables in the cleanup_logs function.
-#   * Added support for passing log directory, retention strategy, and other parameters to cleanup_logs.
-# - v1.8.0 (09-07-2024): 
-#   * Added performance monitoring (timing and resource usage) using time and psutil.
-#   * Added custom metrics for transcription and webhook success/failure.
-#   * Added cProfile profiling for better performance insights.
-# -----------------------------------------------------------------------------
-# Usage: python ttd_transcribed.py <mp3_file> <department> 
-# Example: python ttd_transcribed.py audio.mp3 sales
-# -----------------------------------------------------------------------------
-# Environment Variables:
-# - PUSHOVER_TOKEN: Pushover API token for sending notifications.
-# - PUSHOVER_USER: Pushover user key for sending notifications.
-# -----------------------------------------------------------------------------
-# Dependencies: aiohttp, requests, ratelimit, tqdm, python-dotenv, psutil, prometheus_client
-# -----------------------------------------------------------------------------
-# Whisper AI: https://whisper.ai/
-# Pushover: https://pushover.net/
-# -----------------------------------------------------------------------------
-# License: MIT License
-# -----------------------------------------------------------------------------
-# Disclaimer: This script is provided as-is without any warranties. Use at your own risk.
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
@@ -68,10 +45,10 @@ load_dotenv()
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-script_dir = os.path.dirname(os.path.abspath(__file__))
-config_path = os.path.join(script_dir, 'config.ini')
+script_dir = os.path.dirname(os.path.abspath(__file__))  # Define script directory
+config_path = os.path.join(script_dir, 'config.ini')  # Path to configuration file
 
-# Load configuration from the config.ini file
+# Load configuration from config.ini
 config = configparser.ConfigParser()
 config.read([config_path])
 
@@ -97,31 +74,31 @@ condition_on_previous_text = config.getboolean('ttd_transcribed_Whisper', 'condi
 verbose = config.getboolean('ttd_transcribed_Whisper', 'verbose', fallback=False)
 task = config.get('ttd_transcribed_Whisper', 'task', fallback="transcribe")
 
-# Access the Webhook and base audio URL
+# Webhook and audio URL configuration
 webhook_url = config['ttd_transcribed_Webhook']['ttd_transcribed_url']
 base_audio_url = config['ttd_transcribed_Webhook']['base_audio_url']
 timeout_seconds = int(config['ttd_transcribed_Webhook']['timeout_seconds'])
 retry_limit = config.getint('ttd_transcribed_Retry', 'retry_limit', fallback=3)
 retry_delay = config.getint('ttd_transcribed_Retry', 'retry_delay', fallback=5)
 
-# Access Pushover settings with rate limiting
+# Pushover notification settings
 pushover_token = os.getenv('PUSHOVER_TOKEN')
 pushover_user = os.getenv('PUSHOVER_USER')
 pushover_priority = config['ttd_transcribed_Pushover']['priority']
 pushover_rate_limit_seconds = config.getint('ttd_transcribed_Pushover', 'rate_limit_seconds', fallback=300)
 
-# Define base path for audio files
+# Audio file path
 base_path = config['ttd_transcribed_audio_Path']['base_path']
 
-# Ensure the log directory and transcript directory exist
+# Ensure log and transcript directories exist
 transcript_dir = os.path.join(log_dir, "transcripts")
-persistent_state_path = os.path.join(script_dir, 'persistent_state.json')
+persistent_state_path = os.path.join(script_dir, 'persistent_state.json')  # Path for persistent state
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 if not os.path.exists(transcript_dir):
     os.makedirs(transcript_dir)
 
-# Configure logging
+# Configure logging to both file and console
 log_file_name = f"ttd_transcribed_{datetime.now().strftime('%m-%d-%Y_%H-%M-%S')}.log"
 log_file_path = os.path.join(log_dir, log_file_name)
 
@@ -132,7 +109,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(lineno)d - %(message)s'
 )
 
-# Console logging configuration
+# Console logging configuration (optional)
 if log_to_console:
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(getattr(logging, console_log_level.upper(), logging.INFO))
@@ -147,7 +124,11 @@ logging.info(f"Log file: {log_file_name}")
 # Performance Monitoring: Log CPU and memory usage
 # -----------------------------------------------------------------------------
 def log_system_usage():
-    """Logs the current memory and CPU usage."""
+    """
+    Logs the current memory and CPU usage of the script.
+
+    This function uses the psutil library to fetch and log the memory and CPU usage.
+    """
     process = psutil.Process(os.getpid())
     memory_info = process.memory_info()
     cpu_usage = process.cpu_percent(interval=1)
@@ -157,16 +138,26 @@ def log_system_usage():
 # Function: cleanup_logs
 # -----------------------------------------------------------------------------
 def cleanup_logs(log_dir, cleanup_enabled, retention_strategy, retention_days=None, max_log_files=None):
-    """Cleans up old logs based on retention strategy."""
+    """
+    Cleans up old log files based on time-based or count-based retention strategy.
+    
+    Parameters:
+    log_dir (str): Directory where the log files are stored.
+    cleanup_enabled (bool): Whether log cleanup is enabled.
+    retention_strategy (str): Strategy to use for log cleanup ('time' or 'count').
+    retention_days (int, optional): Retain logs for this many days if using time-based cleanup.
+    max_log_files (int, optional): Retain this many logs if using count-based cleanup.
+    """
     if not cleanup_enabled:
         logging.info("Log cleanup is disabled.")
         return
 
     log_files = sorted(
         [f for f in os.listdir(log_dir) if os.path.isfile(os.path.join(log_dir, f)) and f.startswith("ttd_transcribed_")],
-        key=lambda f: os.path.getmtime(os.path.join(log_dir, f))  # Sort by modification time
+        key=lambda f: os.path.getmtime(os.path.join(log_dir, f))
     )
 
+    # Time-based log cleanup
     if retention_strategy == 'time':
         logging.info(f"Performing time-based log cleanup. Retaining logs for {retention_days} days.")
         now = datetime.now()
@@ -183,6 +174,7 @@ def cleanup_logs(log_dir, cleanup_enabled, retention_strategy, retention_days=No
                 except Exception as e:
                     logging.error(f"Error deleting log file {log_file_path}: {e}")
 
+    # Count-based log cleanup
     elif retention_strategy == 'count':
         logging.info(f"Performing count-based log cleanup. Retaining the latest {max_log_files} logs.")
         if len(log_files) > max_log_files:
@@ -211,7 +203,12 @@ cleanup_logs(
 # Function: load_persistent_state
 # -----------------------------------------------------------------------------
 def load_persistent_state():
-    """Loads the persistent state from a file."""
+    """
+    Loads the persistent state from a file, if available.
+
+    Returns:
+    dict or None: The saved state dictionary or None if the state file does not exist.
+    """
     if os.path.exists(persistent_state_path):
         with open(persistent_state_path, 'r') as f:
             return json.load(f)
@@ -221,7 +218,12 @@ def load_persistent_state():
 # Function: save_persistent_state
 # -----------------------------------------------------------------------------
 def save_persistent_state(state):
-    """Saves the current state to a file for recovery after an interruption."""
+    """
+    Saves the current state to a file to allow resuming after an interruption.
+    
+    Parameters:
+    state (dict): The current state to be saved.
+    """
     with open(persistent_state_path, 'w') as f:
         json.dump(state, f)
 
@@ -237,7 +239,15 @@ webhook_failure = Counter('webhook_failure_total', 'Total number of failed webho
 # Function: transcribe_audio
 # -----------------------------------------------------------------------------
 def transcribe_audio(mp3_file):
-    """Transcribes an audio file using Whisper AI and logs performance."""
+    """
+    Transcribes an audio file using Whisper AI and logs performance metrics.
+
+    Parameters:
+    mp3_file (str): Path to the MP3 file to be transcribed.
+
+    Returns:
+    str: The transcription result text.
+    """
     start_time = time()  # Track start time for performance
     log_system_usage()  # Log CPU and memory usage before transcription
 
@@ -272,7 +282,17 @@ def transcribe_audio(mp3_file):
 @sleep_and_retry
 @limits(calls=1, period=pushover_rate_limit_seconds)  # Rate-limiting for webhook
 async def send_webhook(mp3_file, department, transcription):
-    """Sends the transcription result via a webhook."""
+    """
+    Sends the transcription result via a webhook.
+    
+    Parameters:
+    mp3_file (str): The original MP3 file path.
+    department (str): The department name related to the transcription.
+    transcription (str): The transcribed text to be sent via webhook.
+    
+    Returns:
+    bool: True if the webhook was sent successfully, False otherwise.
+    """
     file_name = os.path.basename(mp3_file)
     file_url = f"{base_audio_url}{file_name}"
     
@@ -313,7 +333,13 @@ async def send_webhook(mp3_file, department, transcription):
 @sleep_and_retry
 @limits(calls=1, period=pushover_rate_limit_seconds)  # Rate-limiting for Pushover notifications
 def send_pushover_notification(title, message):
-    """Sends a Pushover notification."""
+    """
+    Sends a Pushover notification for critical alerts.
+    
+    Parameters:
+    title (str): The title of the notification.
+    message (str): The message content of the notification.
+    """
     payload = {
         "token": pushover_token,
         "user": pushover_user,
@@ -333,7 +359,13 @@ def send_pushover_notification(title, message):
 # Main Function: process_file
 # -----------------------------------------------------------------------------
 async def process_file(mp3_file, department):
-    """Processes the MP3 file: transcribes and sends the result via a webhook."""
+    """
+    Processes the MP3 file, transcribes it, saves the result, and sends it via webhook.
+
+    Parameters:
+    mp3_file (str): Path to the MP3 file.
+    department (str): The department name related to the transcription.
+    """
     try:
         if not os.path.isfile(mp3_file):
             raise FileNotFoundError(f"MP3 file not found: {mp3_file}")
@@ -375,6 +407,9 @@ async def process_file(mp3_file, department):
 # Main Execution
 # -----------------------------------------------------------------------------
 async def main():
+    """
+    Main function that handles script execution: parsing arguments, processing files, etc.
+    """
     logging.debug("Starting ttd_transcribed script.")
     
     # Use argparse to handle command-line arguments
