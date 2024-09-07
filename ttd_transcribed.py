@@ -1,26 +1,30 @@
 import os
 import sys
 import logging
-import requests
+import requests  # Import requests module
+import whisper
 import configparser
 from datetime import datetime
-from time import sleep
 from dotenv import load_dotenv
 
 # -----------------------------------------------------------------------------
 # Script Information
 # -----------------------------------------------------------------------------
-# Script Name: ttd_transcribe.py
-# Version: v1.0.0
+# Script Name: ttd_transcribed.py
+# Version: v1.2.0
 # Author: Quentin King
 # Creation Date: 09-06-2024
-# Description: This script transcribes audio files and sends a webhook to Node-RED 
-#              with the transcription details. It uses logging, a config file for 
-#              configuration, and is modular for easy updates.
+# Description: 
+# This script transcribes audio files using the Whisper AI model and sends a webhook to Node-RED 
+# with the transcription details. The Whisper model size, accuracy parameters, and other settings 
+# are dynamically loaded from a configuration file (config.ini) for flexibility.
 # -----------------------------------------------------------------------------
 # Changelog:
-# - v1.0.0 (09-06-2024): Initial creation of the script. Added basic functionality 
-#                        for transcription, webhook integration, and logging.
+# - v1.2.0 (09-06-2024): Added support for full Whisper settings via config.ini, including 
+#                        beam_size, best_of, and initial_prompt. Added error handling for missing
+#                        config values and improved modularity for future updates.
+# - v1.1.0 (09-06-2024): Added support for model size and temperature settings from config.ini.
+# - v1.0.1 (09-06-2024): Initial version with logging and transcription processing.
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
@@ -42,26 +46,39 @@ config = configparser.ConfigParser()
 config.read([config_path])
 
 # Access the Logging configuration
-log_dir = os.path.join(script_dir, config['ttd_transcribe_Logging']['log_dir'])
-log_level = config['ttd_transcribe_Logging']['log_level']
-max_logs = int(config['ttd_transcribe_Logging']['max_logs'])
-max_log_days = int(config['ttd_transcribe_Logging']['max_log_days'])
-log_to_console = config.getboolean('ttd_transcribe_Logging', 'log_to_console')
+log_dir = os.path.join(script_dir, config['ttd_transcribed_Logging']['log_dir'])
+log_level = config['ttd_transcribed_Logging']['log_level']
+log_to_console = config.getboolean('ttd_transcribed_Logging', 'log_to_console')
+
+# Access Whisper configuration
+model_size = config['ttd_transcribed_Whisper']['model_size']
+temperature = float(config['ttd_transcribed_Whisper']['temperature'])
+timestamps = config.getboolean('ttd_transcribed_Whisper', 'timestamps')
+language = config.get('ttd_transcribed_Whisper', 'language', fallback=None)
+beam_size = config.getint('ttd_transcribed_Whisper', 'beam_size')
+best_of = config.getint('ttd_transcribed_Whisper', 'best_of')
+no_speech_threshold = float(config['ttd_transcribed_Whisper']['no_speech_threshold'])
+compression_ratio_threshold = float(config['ttd_transcribed_Whisper']['compression_ratio_threshold'])
+logprob_threshold = float(config['ttd_transcribed_Whisper']['logprob_threshold'])
+initial_prompt = config.get('ttd_transcribed_Whisper', 'initial_prompt', fallback=None)
+condition_on_previous_text = config.getboolean('ttd_transcribed_Whisper', 'condition_on_previous_text', fallback=True)
+verbose = config.getboolean('ttd_transcribed_Whisper', 'verbose', fallback=False)
+task = config.get('ttd_transcribed_Whisper', 'task', fallback="transcribe")
 
 # Access the Webhook and base audio URL
-webhook_url = config['ttd_transcribe_Webhook']['ttd_transcribe_url']
-base_audio_url = config['ttd_transcribe_Webhook']['base_audio_url']
-timeout_seconds = int(config['ttd_transcribe_Webhook']['timeout_seconds'])
+webhook_url = config['ttd_transcribed_Webhook']['ttd_transcribed_url']
+base_audio_url = config['ttd_transcribed_Webhook']['base_audio_url']
+timeout_seconds = int(config['ttd_transcribed_Webhook']['timeout_seconds'])
 
 # Access the Base Path for Audio Files
-base_path = config['ttd_transcribe_audio_Path']['base_path']
+base_path = config['ttd_transcribed_audio_Path']['base_path']
 
 # Ensure the log directory exists
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 
 # Configure logging
-log_file_name = f"ttd_transcribe_{datetime.now().strftime('%m-%d-%Y_%H-%M-%S')}.log"
+log_file_name = f"ttd_transcribed_{datetime.now().strftime('%m-%d-%Y_%H-%M-%S')}.log"
 log_file_path = os.path.join(log_dir, log_file_name)
 
 logging.basicConfig(
@@ -81,16 +98,42 @@ logging.info(f"Logs will be stored in: {log_dir}")
 logging.info(f"Log file: {log_file_name}")
 
 # -----------------------------------------------------------------------------
+# Function: transcribe_audio
+# -----------------------------------------------------------------------------
+def transcribe_audio(mp3_file):
+    # Load the Whisper model based on the configuration
+    logging.info(f"Loading Whisper model: {model_size} with temperature: {temperature}")
+    model = whisper.load_model(model_size)
+
+    # Transcribe the audio file with the configured settings (without 'timestamps')
+    result = model.transcribe(mp3_file, 
+                              temperature=temperature,
+                              language=language,
+                              beam_size=beam_size,
+                              best_of=best_of,
+                              no_speech_threshold=no_speech_threshold,
+                              compression_ratio_threshold=compression_ratio_threshold,
+                              logprob_threshold=logprob_threshold,
+                              initial_prompt=initial_prompt,
+                              condition_on_previous_text=condition_on_previous_text,
+                              verbose=verbose,
+                              task=task)
+    
+    # Return the transcription
+    return result['text']
+
+
+# -----------------------------------------------------------------------------
 # Function: send_webhook
 # -----------------------------------------------------------------------------
-def send_webhook(mp3_file, department):
+def send_webhook(mp3_file, department, transcription):
     file_name = os.path.basename(mp3_file)
     file_url = f"{base_audio_url}{file_name}"
     
     payload = {
         "msg": {
             "title": f"{department} Audio Transcribed",
-            "payload": f"{department} Audio has been processed.",
+            "payload": transcription,
             "url": file_url,
             "url_title": file_name
         }
@@ -108,7 +151,7 @@ def send_webhook(mp3_file, department):
 # Main Execution
 # -----------------------------------------------------------------------------
 def main():
-    logging.debug("Starting ttd_transcribe script.")
+    logging.debug("Starting ttd_transcribed script.")
     
     try:
         if len(sys.argv) != 3:
@@ -119,7 +162,12 @@ def main():
         logging.info(f"Processing transcription for file: {mp3_file}, Department: {department}")
 
         if os.path.isfile(mp3_file):
-            send_webhook(mp3_file, department)
+            # Transcribe the audio file
+            transcription = transcribe_audio(mp3_file)
+            logging.info(f"Transcription completed for {mp3_file}: {transcription}")
+
+            # Send the transcription via webhook
+            send_webhook(mp3_file, department, transcription)
         else:
             raise FileNotFoundError(f"MP3 file not found: {mp3_file}")
     
@@ -130,7 +178,7 @@ def main():
     except Exception as e:
         logging.error(f"Unexpected error: {e}")
     finally:
-        logging.info("ttd_transcribe script completed.")
+        logging.info("ttd_transcribed script completed.")
 
 if __name__ == "__main__":
     main()
