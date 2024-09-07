@@ -1,28 +1,26 @@
-import os          # Provides functions for interacting with the operating system
-import sys         # Used for system-specific parameters and functions (e.g., command-line arguments)
-import logging     # Used for logging messages for debugging or auditing purposes
-import json        # Used for working with JSON data (e.g., reading and writing JSON files)
-import argparse    # Used for parsing command-line arguments
-from datetime import datetime, timedelta  # Provides classes for working with dates and times
-from time import sleep, time  # Used to pause execution for a specified number of seconds and track time
-
-import asyncio         # Provides support for asynchronous programming
-import aiohttp         # Asynchronous HTTP client for making non-blocking requests
-import whisper         # OpenAI's Whisper model for transcribing audio
-import configparser    # Used for reading configuration files (like `config.ini`)
-import requests        # Makes HTTP requests to APIs or web services
-import psutil          # Provides system and process utilities to monitor CPU and memory usage
-import cProfile        # Used for profiling the script's performance
-from prometheus_client import Counter  # Provides custom metrics like transcription and webhook success counters
-from dotenv import load_dotenv  # Loads environment variables from a `.env` file
-from tqdm import tqdm  # Used to create progress bars for long-running loops or operations
-from ratelimit import limits, sleep_and_retry  # Implements rate limiting for API calls or requests
+import os
+import sys
+import logging
+import json
+import argparse
+from datetime import datetime, timedelta
+from time import sleep, time
+import asyncio
+import aiohttp
+import whisper
+import configparser
+import requests
+import psutil
+from prometheus_client import Counter
+from dotenv import load_dotenv
+from tqdm import tqdm
+from ratelimit import limits, sleep_and_retry
 
 # -----------------------------------------------------------------------------
 # Script Information
 # -----------------------------------------------------------------------------
 # Script Name: ttd_transcribed.py
-# Version: v1.8.1
+# Version: v1.8.2
 # Author: Quentin King
 # Creation Date: 09-07-2024
 # Description:
@@ -31,10 +29,15 @@ from ratelimit import limits, sleep_and_retry  # Implements rate limiting for AP
 # asynchronous requests, Pushover notifications, rate limiting, and persistent state recovery.
 # -----------------------------------------------------------------------------
 # Changelog:
+# - v1.8.2 (09-07-2024): 
+#   * Added logging for CPU and memory usage using `psutil`.
+#   * Implemented time-based and count-based log cleanup.
+#   * Added Prometheus custom metrics for success/failure counts (transcription and webhooks).
+#   * Fixed persistent state path handling.
+#   * Updated version control information.
 # - v1.8.1 (09-07-2024): 
 #   * Fixed missing imports and undefined variables in the cleanup_logs function.
 #   * Added support for passing log directory, retention strategy, and other parameters to cleanup_logs.
-#   * Updated version control information to reflect changes.
 # - v1.8.0 (09-07-2024): 
 #   * Added performance monitoring (timing and resource usage) using time and psutil.
 #   * Added custom metrics for transcription and webhook success/failure.
@@ -75,7 +78,7 @@ config.read([config_path])
 # Access logging configuration
 log_dir = os.path.join(script_dir, config['ttd_transcribed_Logging']['log_dir'])
 log_level = config['ttd_transcribed_Logging']['log_level']
-console_log_level = config.get('ttd_transcribed_Logging', 'console_log_level', fallback='INFO')  # New setting for console log level
+console_log_level = config.get('ttd_transcribed_Logging', 'console_log_level', fallback='INFO')
 delete_after_process = config.getboolean('ttd_transcribed_FileHandling', 'delete_after_process', fallback=False)
 log_to_console = config.getboolean('ttd_transcribed_Logging', 'log_to_console')
 
@@ -112,7 +115,7 @@ base_path = config['ttd_transcribed_audio_Path']['base_path']
 
 # Ensure the log directory and transcript directory exist
 transcript_dir = os.path.join(log_dir, "transcripts")
-persistent_state_path = os.path.join(script_dir, 'persistent_state.json')  # Define persistent_state_path
+persistent_state_path = os.path.join(script_dir, 'persistent_state.json')
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 if not os.path.exists(transcript_dir):
@@ -125,14 +128,14 @@ log_file_path = os.path.join(log_dir, log_file_name)
 # File logging configuration
 logging.basicConfig(
     filename=log_file_path,
-    level=getattr(logging, log_level.upper(), logging.DEBUG),  # File logging level
+    level=getattr(logging, log_level.upper(), logging.DEBUG),
     format='%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(lineno)d - %(message)s'
 )
 
 # Console logging configuration
 if log_to_console:
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(getattr(logging, console_log_level.upper(), logging.INFO))  # Console log level
+    console_handler.setLevel(getattr(logging, console_log_level.upper(), logging.INFO))
     console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(lineno)d - %(message)s'))
     logging.getLogger().addHandler(console_handler)
 
@@ -144,16 +147,17 @@ logging.info(f"Log file: {log_file_name}")
 # Performance Monitoring: Log CPU and memory usage
 # -----------------------------------------------------------------------------
 def log_system_usage():
+    """Logs the current memory and CPU usage."""
     process = psutil.Process(os.getpid())
     memory_info = process.memory_info()
     cpu_usage = process.cpu_percent(interval=1)
-    
     logging.info(f"Memory usage: {memory_info.rss / (1024 * 1024):.2f} MB, CPU usage: {cpu_usage:.2f}%")
 
 # -----------------------------------------------------------------------------
 # Function: cleanup_logs
 # -----------------------------------------------------------------------------
 def cleanup_logs(log_dir, cleanup_enabled, retention_strategy, retention_days=None, max_log_files=None):
+    """Cleans up old logs based on retention strategy."""
     if not cleanup_enabled:
         logging.info("Log cleanup is disabled.")
         return
@@ -207,6 +211,7 @@ cleanup_logs(
 # Function: load_persistent_state
 # -----------------------------------------------------------------------------
 def load_persistent_state():
+    """Loads the persistent state from a file."""
     if os.path.exists(persistent_state_path):
         with open(persistent_state_path, 'r') as f:
             return json.load(f)
@@ -216,6 +221,7 @@ def load_persistent_state():
 # Function: save_persistent_state
 # -----------------------------------------------------------------------------
 def save_persistent_state(state):
+    """Saves the current state to a file for recovery after an interruption."""
     with open(persistent_state_path, 'w') as f:
         json.dump(state, f)
 
@@ -231,6 +237,7 @@ webhook_failure = Counter('webhook_failure_total', 'Total number of failed webho
 # Function: transcribe_audio
 # -----------------------------------------------------------------------------
 def transcribe_audio(mp3_file):
+    """Transcribes an audio file using Whisper AI and logs performance."""
     start_time = time()  # Track start time for performance
     log_system_usage()  # Log CPU and memory usage before transcription
 
@@ -265,6 +272,7 @@ def transcribe_audio(mp3_file):
 @sleep_and_retry
 @limits(calls=1, period=pushover_rate_limit_seconds)  # Rate-limiting for webhook
 async def send_webhook(mp3_file, department, transcription):
+    """Sends the transcription result via a webhook."""
     file_name = os.path.basename(mp3_file)
     file_url = f"{base_audio_url}{file_name}"
     
@@ -305,6 +313,7 @@ async def send_webhook(mp3_file, department, transcription):
 @sleep_and_retry
 @limits(calls=1, period=pushover_rate_limit_seconds)  # Rate-limiting for Pushover notifications
 def send_pushover_notification(title, message):
+    """Sends a Pushover notification."""
     payload = {
         "token": pushover_token,
         "user": pushover_user,
@@ -324,6 +333,7 @@ def send_pushover_notification(title, message):
 # Main Function: process_file
 # -----------------------------------------------------------------------------
 async def process_file(mp3_file, department):
+    """Processes the MP3 file: transcribes and sends the result via a webhook."""
     try:
         if not os.path.isfile(mp3_file):
             raise FileNotFoundError(f"MP3 file not found: {mp3_file}")
