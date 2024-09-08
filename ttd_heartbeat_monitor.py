@@ -14,23 +14,37 @@ from dotenv import load_dotenv
 # Script Information
 # -----------------------------------------------------------------------------
 # Script Name: ttd_heartbeat_monitor.py
-# Version: v1.5.0
+# Version: v1.6.1
 # Author: Quentin King
-# Date: 09-01-2024
+# Date: 09-08-2024
 # Description: This script monitors a heartbeat file for updates. If the heartbeat
 #              is not detected within the expected threshold, it attempts to restart
 #              the monitored program by executing an external Python script (start.py).
 #              The script sends notifications via Pushover and a webhook if the heartbeat
 #              fails or if the restart attempt occurs.
-# Changelog:
+#
+# Documentation: 
+# - The script logs heartbeat checks, errors, and notifications into standard log and audit files.
+# - It checks the heartbeat file periodically (based on 'check_interval' from config).
+# - Rate limiting is applied to prevent spamming notifications (5-minute cooldown).
+#
+# Version History:
+# - v1.6.1: Added log rotation and cleanup, improved error handling, and changed date format.
+# - v1.6.0: Enhanced config with default values, improved version control, and fallback logic.
 # - v1.5.0: Moved sensitive credentials to environment variables, updated logging 
 #           and audit logging, and ensured all settings from config.ini are used.
 # - v1.4.2: Implemented audit logging and feature toggles. Verified all settings from config.ini are used.
+# - v1.4.0: Added error handling for Pushover notifications and introduced Webhook support.
+# - v1.3.0: Introduced rate limiting to prevent spam alerts. 
+# - v1.2.0: Added retry mechanism for external script execution in case of failure.
+# - v1.1.0: Introduced Pushover notification system for error alerts.
+# - v1.0.0: Initial version of the heartbeat monitor with basic file checking and external restart.
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
 # Load Environment Variables
 # -----------------------------------------------------------------------------
+# Load environment variables from the .env file to retrieve sensitive credentials
 load_dotenv()
 
 # -----------------------------------------------------------------------------
@@ -46,18 +60,21 @@ config_path = os.path.join(script_dir, 'config.ini')
 config = configparser.ConfigParser(interpolation=None)
 config.read(config_path)
 
-# Access the Logging configuration
-log_dir = os.path.join(script_dir, config['ttd_heartbeat_Logging']['log_dir'])
-log_level = config['ttd_heartbeat_Logging']['log_level']
-log_format = config['ttd_heartbeat_Logging']['log_format']
-log_to_console = config.getboolean('ttd_heartbeat_Logging', 'log_to_console')
-max_log_days = int(config['ttd_heartbeat_Logging']['max_log_days'])
+# -----------------------------------------------------------------------------
+# Logging Configuration
+# -----------------------------------------------------------------------------
+# Access Logging configuration with fallback defaults in case config.ini is incomplete
+log_dir = os.path.join(script_dir, config['ttd_heartbeat_Logging'].get('log_dir', '/default/log/dir'))
+log_level = config['ttd_heartbeat_Logging'].get('log_level', 'INFO')
+log_format = config['ttd_heartbeat_Logging'].get('log_format', '%(asctime)s - %(levelname)s - %(message)s')
+log_to_console = config.getboolean('ttd_heartbeat_Logging', 'log_to_console', fallback=True)
+max_log_days = config['ttd_heartbeat_Logging'].getint('max_log_days', 7)
 
 # Ensure the log directory exists
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 
-# Configure logging
+# Configure logging with fallback defaults for logging directory and format
 log_file_name = f"heartbeat_monitor_{datetime.now().strftime('%m-%d-%Y_%H-%M-%S')}.log"
 log_file_path = os.path.join(log_dir, log_file_name)
 
@@ -67,44 +84,69 @@ logging.basicConfig(
     format=log_format
 )
 
+
+# Optionally log to console if enabled in config
 if log_to_console:
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(getattr(logging, log_level.upper(), logging.DEBUG))
     console_handler.setFormatter(logging.Formatter(log_format))
     logging.getLogger().addHandler(console_handler)
 
+# Add a RotatingFileHandler for the standard log file
+rotating_handler = RotatingFileHandler(log_file_path, maxBytes=1048576, backupCount=5)  # 1 MB file size limit
+rotating_handler.setFormatter(logging.Formatter(log_format))  # Use the same format as basicConfig
+logging.getLogger().addHandler(rotating_handler)
+
+
 logging.info("Logging initialized.")
 logging.info(f"Logs will be stored in: {log_dir}")
 logging.info(f"Log file: {log_file_name}")
 
-# Access the Heartbeat monitoring configuration
-heartbeat_file = config['Heartbeat']['file_path']
-check_interval = int(config['Heartbeat']['check_interval'])
-heartbeat_threshold = int(config['Heartbeat'].get('threshold', int(check_interval * 1.5)))
-min_threshold = 60  # Minimum threshold to avoid overly sensitive alerts
+# -----------------------------------------------------------------------------
+# Heartbeat Monitoring Configuration
+# -----------------------------------------------------------------------------
+# Access Heartbeat monitoring configuration with fallback defaults
+heartbeat_file = config['Heartbeat'].get('file_path', '/default/heartbeat/path')
+check_interval = config['Heartbeat'].getint('check_interval', 60)  # Default check every 60 seconds
+heartbeat_threshold = config['Heartbeat'].getint('threshold', int(check_interval * 1.5))  # Default threshold
+
+# Minimum threshold safeguard to prevent overly sensitive alerts
+min_threshold = 60
 heartbeat_threshold = max(heartbeat_threshold, min_threshold)
 
-# External script to start the program
-external_script = config['Restart_Path']['file_path']
+# External script to start the monitored program, with fallback default
+external_script = config['Restart_Path'].get('file_path', '/default/start/script/path')
 
-# Access the Pushover credentials and settings from environment variables
-pushover_token = os.getenv('PUSHOVER_TOKEN')
-pushover_user = os.getenv('PUSHOVER_USER')
-pushover_priority = int(config['ttd_heartbeat_Pushover']['priority'])
-pushover_retry = int(config['ttd_heartbeat_Pushover']['retry'])
-pushover_expire = int(config['ttd_heartbeat_Pushover']['expire'])
-pushover_sound = config['ttd_heartbeat_Pushover']['sound']
+# -----------------------------------------------------------------------------
+# Pushover Configuration
+# -----------------------------------------------------------------------------
+# Access Pushover credentials and settings from environment variables or fallback defaults
+pushover_token = os.getenv('PUSHOVER_TOKEN', 'default_token')
+pushover_user = os.getenv('PUSHOVER_USER', 'default_user')
+pushover_priority = config['ttd_heartbeat_Pushover'].getint('priority', 1)
+pushover_retry = config['ttd_heartbeat_Pushover'].getint('retry', 60)
+pushover_expire = config['ttd_heartbeat_Pushover'].getint('expire', 3600)
+pushover_sound = config['ttd_heartbeat_Pushover'].get('sound', 'pushover')
 
-# Access the Webhook configuration
-webhook_url = config['Webhook']['heartbeat_url']
+# -----------------------------------------------------------------------------
+# Webhook Configuration
+# -----------------------------------------------------------------------------
+# Access Webhook configuration with fallback default URL
+webhook_url = config['Webhook'].get('heartbeat_url', 'http://default_webhook_url')
 
-# Access the Feature Toggles
-enable_restart_notifications = config.getboolean('ttd_heartbeat_Features', 'enable_restart_notifications')
-enable_rate_limiting = config.getboolean('ttd_heartbeat_Features', 'enable_rate_limiting')
+# -----------------------------------------------------------------------------
+# Feature Toggles
+# -----------------------------------------------------------------------------
+# Access feature toggles with fallback defaults
+enable_restart_notifications = config.getboolean('ttd_heartbeat_Features', 'enable_restart_notifications', fallback=True)
+enable_rate_limiting = config.getboolean('ttd_heartbeat_Features', 'enable_rate_limiting', fallback=True)
 
-# Access the Audit Logging configuration
-audit_log_dir = os.path.join(script_dir, config['ttd_heartbeat_AuditLogging']['audit_log_dir'])
-audit_log_level = config['ttd_heartbeat_AuditLogging']['audit_log_level']
+# -----------------------------------------------------------------------------
+# Audit Logging Configuration
+# -----------------------------------------------------------------------------
+# Audit log configuration with fallback defaults
+audit_log_dir = os.path.join(script_dir, config['ttd_heartbeat_AuditLogging'].get('audit_log_dir', '/default/audit/dir'))
+audit_log_level = config['ttd_heartbeat_AuditLogging'].get('audit_log_level', 'INFO')
 
 # Ensure the audit log directory exists
 if not os.path.exists(audit_log_dir):
@@ -239,7 +281,7 @@ def send_alert(message, relaunching=False, relaunch_success=False):
     if not apply_rate_limit or (last_alert_time is None or (current_time - last_alert_time) > 300):  # 5-minute cooldown
         last_alert_time = current_time
         # Add timestamp to the message
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        timestamp = datetime.now().strftime('%A %B %d, %Y %H:%M:%S')
         full_message = f"{timestamp} - {message}"
 
         # Send webhook notification
@@ -333,11 +375,11 @@ def graceful_shutdown(signal_received, frame):
     Returns:
         None
     """
-    shutdown_message = config['ttd_heartbeat_Shutdown']['shutdown_message']
+    shutdown_message = config['ttd_heartbeat_Shutdown'].get('shutdown_message', 'Heartbeat Monitor shutting down...')
     logging.info("Graceful shutdown initiated.")
     audit_logger.info("Graceful shutdown initiated.")
     send_alert(shutdown_message)
-    if config.getboolean('ttd_heartbeat_Shutdown', 'perform_cleanup'):
+    if config.getboolean('ttd_heartbeat_Shutdown', 'perform_cleanup', fallback=True):
         cleanup_logs()
     sys.exit(0)
 
