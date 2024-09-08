@@ -8,19 +8,19 @@ from time import sleep, time
 import asyncio
 import aiohttp
 import whisper
+import configparser
 import requests
 import psutil
 from prometheus_client import Counter
 from dotenv import load_dotenv
 from tqdm import tqdm
 from ratelimit import limits, sleep_and_retry
-from pydantic import BaseModel, Field, HttpUrl, DirectoryPath, ValidationError
 
 # -----------------------------------------------------------------------------
 # Script Information
 # -----------------------------------------------------------------------------
 # Script Name: ttd_transcribed.py
-# Version: v1.9.0
+# Version: v1.8.3
 # Author: Quentin King
 # Creation Date: 09-07-2024
 # Description:
@@ -29,12 +29,17 @@ from pydantic import BaseModel, Field, HttpUrl, DirectoryPath, ValidationError
 # asynchronous requests, Pushover notifications, rate limiting, and persistent state recovery.
 # -----------------------------------------------------------------------------
 # Changelog:
-# - v1.9.0 (09-07-2024): 
-#   * Introduced modular functions for error handling and common operations.
-#   * Enhanced error handling with specific error messages for network, file, and transcription issues.
-#   * Switched to `pydantic` for configuration validation and structure.
-#   * Added detailed docstrings for all functions for better documentation.
-#   * Updated version control and logging improvements.
+# - v1.8.3 (09-07-2024):
+#   * Fixed missing function definitions like save_persistent_state and load_persistent_state.
+#   * Corrected missing imports (argparse, os, logging) for various sections.
+#   * Implemented enhanced error handling with log_error function.
+#   * Updated documentation with comprehensive docstrings for functions.
+# - v1.8.2 (09-07-2024): 
+#   * Added logging for CPU and memory usage using `psutil`.
+#   * Implemented time-based and count-based log cleanup.
+#   * Added Prometheus custom metrics for success/failure counts (transcription and webhooks).
+#   * Fixed persistent state path handling.
+#   * Updated version control information.
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
@@ -43,82 +48,91 @@ from pydantic import BaseModel, Field, HttpUrl, DirectoryPath, ValidationError
 load_dotenv()
 
 # -----------------------------------------------------------------------------
-# Configuration Using pydantic for Validation
+# Configuration
 # -----------------------------------------------------------------------------
-class Config(BaseModel):
-    log_dir: DirectoryPath
-    log_level: str
-    pushover_token: str
-    pushover_user: str
-    webhook_url: HttpUrl
-    base_audio_url: HttpUrl
-    retry_limit: int = Field(..., gt=0)  # Must be greater than 0
-    timeout_seconds: int = Field(..., gt=0)
-    retention_days: int = Field(..., gt=0)
-    max_log_files: int = Field(..., gt=0)
-    cleanup_enabled: bool = True
-    retention_strategy: str = Field(..., regex="^(time|count)$")
+script_dir = os.path.dirname(os.path.abspath(__file__))  # Define script directory
+config_path = os.path.join(script_dir, 'config.ini')  # Path to configuration file
 
-# Try loading the config
-try:
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(script_dir, 'config.ini')
-    config_parser = configparser.ConfigParser()
-    config_parser.read([config_path])
+# Load configuration from config.ini
+config = configparser.ConfigParser()
+config.read([config_path])
 
-    config = Config(
-        log_dir=config_parser.get('ttd_transcribed_Logging', 'log_dir'),
-        log_level=config_parser.get('ttd_transcribed_Logging', 'log_level'),
-        pushover_token=os.getenv('PUSHOVER_TOKEN'),
-        pushover_user=os.getenv('PUSHOVER_USER'),
-        webhook_url=config_parser.get('ttd_transcribed_Webhook', 'ttd_transcribed_url'),
-        base_audio_url=config_parser.get('ttd_transcribed_Webhook', 'base_audio_url'),
-        retry_limit=config_parser.getint('ttd_transcribed_Retry', 'retry_limit', fallback=3),
-        timeout_seconds=config_parser.getint('ttd_transcribed_Webhook', 'timeout_seconds'),
-        retention_days=config_parser.getint('ttd_transcribed_LogCleanup', 'retention_days', fallback=7),
-        max_log_files=config_parser.getint('ttd_transcribed_LogCleanup', 'max_log_files', fallback=10),
-        cleanup_enabled=config_parser.getboolean('ttd_transcribed_LogCleanup', 'cleanup_enabled', fallback=False),
-        retention_strategy=config_parser.get('ttd_transcribed_LogCleanup', 'retention_strategy', fallback='time')
-    )
-except ValidationError as e:
-    print(f"Configuration error: {e}")
-    sys.exit(1)
+# Access logging configuration
+log_dir = os.path.join(script_dir, config['ttd_transcribed_Logging']['log_dir'])
+log_level = config['ttd_transcribed_Logging']['log_level']
+console_log_level = config.get('ttd_transcribed_Logging', 'console_log_level', fallback='INFO')
+delete_after_process = config.getboolean('ttd_transcribed_FileHandling', 'delete_after_process', fallback=False)
+log_to_console = config.getboolean('ttd_transcribed_Logging', 'log_to_console')
 
-# Ensure log directories exist
-if not os.path.exists(config.log_dir):
-    os.makedirs(config.log_dir)
+# Access Whisper configuration
+model_size = config['ttd_transcribed_Whisper']['model_size']
+temperature = float(config['ttd_transcribed_Whisper']['temperature'])
+timestamps = config.getboolean('ttd_transcribed_Whisper', 'timestamps')
+language = config.get('ttd_transcribed_Whisper', 'language', fallback=None)
+beam_size = config.getint('ttd_transcribed_Whisper', 'beam_size')
+best_of = config.getint('ttd_transcribed_Whisper', 'best_of')
+no_speech_threshold = float(config['ttd_transcribed_Whisper']['no_speech_threshold'])
+compression_ratio_threshold = float(config['ttd_transcribed_Whisper']['compression_ratio_threshold'])
+logprob_threshold = float(config['ttd_transcribed_Whisper']['logprob_threshold'])
+initial_prompt = config.get('ttd_transcribed_Whisper', 'initial_prompt', fallback=None)
+condition_on_previous_text = config.getboolean('ttd_transcribed_Whisper', 'condition_on_previous_text', fallback=True)
+verbose = config.getboolean('ttd_transcribed_Whisper', 'verbose', fallback=False)
+task = config.get('ttd_transcribed_Whisper', 'task', fallback="transcribe")
 
-# -----------------------------------------------------------------------------
-# Logging Setup
-# -----------------------------------------------------------------------------
+# Webhook and audio URL configuration
+webhook_url = config['ttd_transcribed_Webhook']['ttd_transcribed_url']
+base_audio_url = config['ttd_transcribed_Webhook']['base_audio_url']
+timeout_seconds = int(config['ttd_transcribed_Webhook']['timeout_seconds'])
+retry_limit = config.getint('ttd_transcribed_Retry', 'retry_limit', fallback=3)
+retry_delay = config.getint('ttd_transcribed_Retry', 'retry_delay', fallback=5)
+
+# Pushover notification settings
+pushover_token = os.getenv('PUSHOVER_TOKEN')
+pushover_user = os.getenv('PUSHOVER_USER')
+pushover_priority = config['ttd_transcribed_Pushover']['priority']
+pushover_rate_limit_seconds = config.getint('ttd_transcribed_Pushover', 'rate_limit_seconds', fallback=300)
+
+# Audio file path
+base_path = config['ttd_transcribed_audio_Path']['base_path']
+
+# Ensure log and transcript directories exist
+transcript_dir = os.path.join(log_dir, "transcripts")
+persistent_state_path = os.path.join(script_dir, 'persistent_state.json')  # Path for persistent state
+if not os.path.exists(log_dir):
+    os.makedirs(log_dir)
+if not os.path.exists(transcript_dir):
+    os.makedirs(transcript_dir)
+
+# Configure logging to both file and console
 log_file_name = f"ttd_transcribed_{datetime.now().strftime('%m-%d-%Y_%H-%M-%S')}.log"
-log_file_path = os.path.join(config.log_dir, log_file_name)
+log_file_path = os.path.join(log_dir, log_file_name)
 
+# File logging configuration
 logging.basicConfig(
     filename=log_file_path,
-    level=getattr(logging, config.log_level.upper(), logging.DEBUG),
+    level=getattr(logging, log_level.upper(), logging.DEBUG),
     format='%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(lineno)d - %(message)s'
 )
 
-# -----------------------------------------------------------------------------
-# Function: log_error
-# -----------------------------------------------------------------------------
-def log_error(error_type: str, message: str):
-    """
-    Logs a specific type of error with a detailed message.
-    
-    Parameters:
-    error_type (str): The type of error (e.g., 'Network', 'File', 'Whisper').
-    message (str): The detailed error message to log.
-    """
-    logging.error(f"{error_type} Error: {message}")
+# Console logging configuration (optional)
+if log_to_console:
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(getattr(logging, console_log_level.upper(), logging.INFO))
+    console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(lineno)d - %(message)s'))
+    logging.getLogger().addHandler(console_handler)
+
+logging.info("Logging initialized.")
+logging.info(f"Logs will be stored in: {log_dir}")
+logging.info(f"Log file: {log_file_name}")
 
 # -----------------------------------------------------------------------------
-# Performance Monitoring: Log CPU and Memory Usage
+# Performance Monitoring: Log CPU and memory usage
 # -----------------------------------------------------------------------------
 def log_system_usage():
     """
-    Logs the current memory and CPU usage of the script using psutil.
+    Logs the current memory and CPU usage of the script.
+
+    This function uses the psutil library to fetch and log the memory and CPU usage.
     """
     process = psutil.Process(os.getpid())
     memory_info = process.memory_info()
@@ -128,7 +142,7 @@ def log_system_usage():
 # -----------------------------------------------------------------------------
 # Function: cleanup_logs
 # -----------------------------------------------------------------------------
-def cleanup_logs(log_dir: str, cleanup_enabled: bool, retention_strategy: str, retention_days: int = None, max_log_files: int = None):
+def cleanup_logs(log_dir, cleanup_enabled, retention_strategy, retention_days=None, max_log_files=None):
     """
     Cleans up old log files based on time-based or count-based retention strategy.
     
@@ -148,6 +162,7 @@ def cleanup_logs(log_dir: str, cleanup_enabled: bool, retention_strategy: str, r
         key=lambda f: os.path.getmtime(os.path.join(log_dir, f))
     )
 
+    # Time-based log cleanup
     if retention_strategy == 'time':
         logging.info(f"Performing time-based log cleanup. Retaining logs for {retention_days} days.")
         now = datetime.now()
@@ -164,10 +179,11 @@ def cleanup_logs(log_dir: str, cleanup_enabled: bool, retention_strategy: str, r
                 except Exception as e:
                     logging.error(f"Error deleting log file {log_file_path}: {e}")
 
+    # Count-based log cleanup
     elif retention_strategy == 'count':
         logging.info(f"Performing count-based log cleanup. Retaining the latest {max_log_files} logs.")
         if len(log_files) > max_log_files:
-            logs_to_delete = log_files[:-max_log_files]
+            logs_to_delete = log_files[:-max_log_files]  # Oldest files to delete
             for log_file in logs_to_delete:
                 log_file_path = os.path.join(log_dir, log_file)
                 try:
@@ -179,19 +195,68 @@ def cleanup_logs(log_dir: str, cleanup_enabled: bool, retention_strategy: str, r
     else:
         logging.warning(f"Unknown retention strategy: {retention_strategy}")
 
-# Call cleanup at startup
+# Call the log cleanup function at script startup
 cleanup_logs(
-    log_dir=config.log_dir,
-    cleanup_enabled=config.cleanup_enabled,
-    retention_strategy=config.retention_strategy,
-    retention_days=config.retention_days,
-    max_log_files=config.max_log_files
+    log_dir=log_dir,
+    cleanup_enabled=config.getboolean('ttd_transcribed_LogCleanup', 'cleanup_enabled', fallback=False),
+    retention_strategy=config.get('ttd_transcribed_LogCleanup', 'retention_strategy', fallback='time'),
+    retention_days=config.getint('ttd_transcribed_LogCleanup', 'retention_days', fallback=7),
+    max_log_files=config.getint('ttd_transcribed_LogCleanup', 'max_log_files', fallback=10)
 )
+
+# -----------------------------------------------------------------------------
+# Function: load_persistent_state
+# -----------------------------------------------------------------------------
+def load_persistent_state():
+    """
+    Loads the persistent state from a file, if available.
+
+    Returns:
+    dict or None: The saved state dictionary or None if the state file does not exist.
+    """
+    if os.path.exists(persistent_state_path):
+        with open(persistent_state_path, 'r') as f:
+            return json.load(f)
+    return None
+
+# -----------------------------------------------------------------------------
+# Function: save_persistent_state
+# -----------------------------------------------------------------------------
+def save_persistent_state(state):
+    """
+    Saves the current state to a file to allow resuming after an interruption.
+    
+    Parameters:
+    state (dict): The current state to be saved.
+    """
+    with open(persistent_state_path, 'w') as f:
+        json.dump(state, f)
+
+# -----------------------------------------------------------------------------
+# Function: log_error
+# -----------------------------------------------------------------------------
+def log_error(exception: Exception, message: str = "An error occurred"):
+    """
+    Logs an error message with the exception details.
+
+    Parameters:
+    exception (Exception): The caught exception.
+    message (str): The error message to log alongside the exception.
+    """
+    logging.error(f"{message}: {str(exception)}")
+
+# -----------------------------------------------------------------------------
+# Custom Metrics: Transcription and Webhook Success/Failure
+# -----------------------------------------------------------------------------
+transcription_success = Counter('transcription_success_total', 'Total number of successful transcriptions')
+transcription_failure = Counter('transcription_failure_total', 'Total number of failed transcriptions')
+webhook_success = Counter('webhook_success_total', 'Total number of successful webhook requests')
+webhook_failure = Counter('webhook_failure_total', 'Total number of failed webhook requests')
 
 # -----------------------------------------------------------------------------
 # Function: transcribe_audio
 # -----------------------------------------------------------------------------
-def transcribe_audio(mp3_file: str) -> str:
+def transcribe_audio(mp3_file):
     """
     Transcribes an audio file using Whisper AI and logs performance metrics.
 
@@ -199,51 +264,55 @@ def transcribe_audio(mp3_file: str) -> str:
     mp3_file (str): Path to the MP3 file to be transcribed.
 
     Returns:
-    str: The transcription result.
+    str: The transcription result text.
     """
-    start_time = time()
-    log_system_usage()
+    start_time = time()  # Track start time for performance
+    log_system_usage()  # Log CPU and memory usage before transcription
 
-    logging.info(f"Loading Whisper model: {config.model_size} with temperature: {config.temperature}")
-    model = whisper.load_model(config.model_size)
+    logging.info(f"Loading Whisper model: {model_size} with temperature: {temperature}")
+    model = whisper.load_model(model_size)
 
     logging.info(f"Starting transcription for {mp3_file}")
     result = model.transcribe(mp3_file, 
-                              temperature=config.temperature,
-                              language=config.language,
-                              beam_size=config.beam_size,
-                              best_of=config.best_of,
-                              no_speech_threshold=config.no_speech_threshold,
-                              compression_ratio_threshold=config.compression_ratio_threshold,
-                              logprob_threshold=config.logprob_threshold,
-                              initial_prompt=config.initial_prompt,
-                              condition_on_previous_text=config.condition_on_previous_text,
-                              verbose=config.verbose,
-                              task=config.task)
-
-    end_time = time()
+                              temperature=temperature,
+                              language=language,
+                              beam_size=beam_size,
+                              best_of=best_of,
+                              no_speech_threshold=no_speech_threshold,
+                              compression_ratio_threshold=compression_ratio_threshold,
+                              logprob_threshold=logprob_threshold,
+                              initial_prompt=initial_prompt,
+                              condition_on_previous_text=condition_on_previous_text,
+                              verbose=verbose,
+                              task=task)
+    
+    end_time = time()  # Track end time
     logging.info(f"Transcription completed in {end_time - start_time:.2f} seconds for {mp3_file}")
+    transcription_success.inc()  # Increment transcription success counter
+
+    log_system_usage()  # Log CPU and memory usage after transcription
+
     return result['text']
 
 # -----------------------------------------------------------------------------
 # Async Function: send_webhook
 # -----------------------------------------------------------------------------
 @sleep_and_retry
-@limits(calls=1, period=config.pushover_rate_limit_seconds)
-async def send_webhook(mp3_file: str, department: str, transcription: str) -> bool:
+@limits(calls=1, period=pushover_rate_limit_seconds)  # Rate-limiting for webhook
+async def send_webhook(mp3_file, department, transcription):
     """
-    Sends the transcription result via a webhook to the Node-RED server.
-
+    Sends the transcription result via a webhook.
+    
     Parameters:
-    mp3_file (str): Path to the MP3 file.
-    department (str): The department the file belongs to.
-    transcription (str): The transcription text.
-
+    mp3_file (str): The original MP3 file path.
+    department (str): The department name related to the transcription.
+    transcription (str): The transcribed text to be sent via webhook.
+    
     Returns:
-    bool: True if successful, False otherwise.
+    bool: True if the webhook was sent successfully, False otherwise.
     """
     file_name = os.path.basename(mp3_file)
-    file_url = f"{config.base_audio_url}{file_name}"
+    file_url = f"{base_audio_url}{file_name}"
     
     payload = {
         "msg": {
@@ -255,43 +324,46 @@ async def send_webhook(mp3_file: str, department: str, transcription: str) -> bo
     }
 
     attempt = 0
-    while attempt < config.retry_limit:
+    while attempt < retry_limit:
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(config.webhook_url, json=payload, timeout=config.timeout_seconds) as response:
+                async with session.post(webhook_url, json=payload, timeout=timeout_seconds) as response:
                     response.raise_for_status()
                     logging.info(f"Webhook sent successfully for {file_name}.")
+                    webhook_success.inc()  # Increment webhook success counter
                     return True
         except aiohttp.ClientError as e:
-            log_error('Network', f"Failed to send webhook for {file_name}: {e}")
+            log_error(e, f"Failed to send webhook for {file_name}")
             attempt += 1
-            backoff_time = config.retry_delay * (2 ** (attempt - 1))
-            if attempt < config.retry_limit:
+            backoff_time = retry_delay * (2 ** (attempt - 1))  # Exponential backoff
+            if attempt < retry_limit:
                 logging.info(f"Retrying webhook in {backoff_time} seconds...")
                 await asyncio.sleep(backoff_time)
     
-    logging.error(f"Webhook failed after {config.retry_limit} attempts.")
+    logging.error(f"Webhook failed after {retry_limit} attempts.")
+    webhook_failure.inc()  # Increment webhook failure counter
+    send_pushover_notification("Webhook Failure", f"Failed to send webhook for {file_name} after {retry_limit} attempts.")
     return False
 
 # -----------------------------------------------------------------------------
 # Function: send_pushover_notification
 # -----------------------------------------------------------------------------
 @sleep_and_retry
-@limits(calls=1, period=config.pushover_rate_limit_seconds)
-def send_pushover_notification(title: str, message: str):
+@limits(calls=1, period=pushover_rate_limit_seconds)  # Rate-limiting for Pushover notifications
+def send_pushover_notification(title, message):
     """
-    Sends a Pushover notification in case of critical errors.
-
+    Sends a Pushover notification for critical alerts.
+    
     Parameters:
-    title (str): The notification title.
-    message (str): The notification message.
+    title (str): The title of the notification.
+    message (str): The message content of the notification.
     """
     payload = {
-        "token": config.pushover_token,
-        "user": config.pushover_user,
+        "token": pushover_token,
+        "user": pushover_user,
         "message": message,
         "title": title,
-        "priority": config.pushover_priority,
+        "priority": pushover_priority,
     }
 
     try:
@@ -299,12 +371,12 @@ def send_pushover_notification(title: str, message: str):
         response.raise_for_status()
         logging.info(f"Pushover notification sent successfully: {title}")
     except requests.exceptions.RequestException as e:
-        log_error('Pushover', f"Failed to send Pushover notification: {e}")
+        log_error(e, f"Failed to send Pushover notification")
 
 # -----------------------------------------------------------------------------
 # Main Function: process_file
 # -----------------------------------------------------------------------------
-async def process_file(mp3_file: str, department: str):
+async def process_file(mp3_file, department):
     """
     Processes the MP3 file, transcribes it, saves the result, and sends it via webhook.
 
@@ -320,29 +392,45 @@ async def process_file(mp3_file: str, department: str):
         transcription = transcribe_audio(mp3_file)
         logging.info(f"Transcription completed for {mp3_file}: {transcription}")
 
+        # Save the transcription to a file
+        transcript_file_path = os.path.join(transcript_dir, f"{os.path.basename(mp3_file)}.txt")
+        with open(transcript_file_path, 'w') as f:
+            f.write(transcription)
+        logging.info(f"Transcription saved to: {transcript_file_path}")
+
         # Send the transcription via webhook
         if await send_webhook(mp3_file, department, transcription):
-            if config.delete_after_process:
+            if delete_after_process:
                 os.remove(mp3_file)
                 logging.info(f"Deleted processed file: {mp3_file}")
 
+        # Clean up persistent state
+        if os.path.exists(persistent_state_path):
+            os.remove(persistent_state_path)
+
     except FileNotFoundError as fnf_error:
-        log_error('File', str(fnf_error))
+        log_error(fnf_error, "File not found")
+        transcription_failure.inc()  # Increment transcription failure counter
     except aiohttp.ClientError as client_error:
-        log_error('Network', str(client_error))
+        log_error(client_error, "Network error")
+        webhook_failure.inc()  # Increment webhook failure counter
     except whisper.exceptions.WhisperException as whisper_error:
-        log_error('Whisper', str(whisper_error))
+        log_error(whisper_error, "Whisper model error")
     except Exception as e:
-        log_error('General', str(e))
+        log_error(e, "Unexpected error occurred")
         save_persistent_state({"mp3_file": mp3_file, "department": department})
+        send_pushover_notification("Script Error", f"Unexpected error occurred: {e}")
 
 # -----------------------------------------------------------------------------
 # Main Execution
 # -----------------------------------------------------------------------------
 async def main():
     """
-    Main entry point for script execution. Handles argument parsing and processing.
+    Main function that handles script execution: parsing arguments, processing files, etc.
     """
+    logging.debug("Starting ttd_transcribed script.")
+    
+    # Use argparse to handle command-line arguments
     parser = argparse.ArgumentParser(description="Transcribe audio files and send the result via webhook.")
     parser.add_argument("mp3_file", type=str, help="The MP3 file to transcribe.")
     parser.add_argument("department", type=str, help="The department the file belongs to.")
@@ -356,10 +444,11 @@ async def main():
         department = state['department']
         logging.info(f"Resuming transcription for file: {mp3_file}, Department: {department}")
     else:
-        mp3_file = os.path.join(config.base_path, args.mp3_file)
+        mp3_file = os.path.join(base_path, args.mp3_file)
         department = args.department
         logging.info(f"Processing transcription for file: {mp3_file}, Department: {department}")
 
+    # Now call the processing function
     await process_file(mp3_file, department)
 
 if __name__ == "__main__":
