@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 """
 ttd_audio_notification.py
--------------------------
+--------------------------
 Script for processing Two-Tone Detect audio notifications.
 
 Author: Your Name
-Version: v2.4.1
-Date: 2024-09-17
+Version: v2.4.2
+Date: 2024-09-24
 
 Description:
 This script performs the following tasks:
@@ -19,9 +19,11 @@ This script performs the following tasks:
 - Rotates and archives logs based on time and retention policies.
 - Monitors performance metrics (CPU and memory usage) and sends alerts if thresholds are exceeded.
 
-Enhancements in v2.4.1:
-- Fixed function ordering to prevent NameError.
-- Ensured all functions are defined before they are called.
+Enhancements in v2.4.2:
+- Fixed issues where webhook errors did not trigger Pushover notifications.
+- Extended Pushover rate limiting to allow more frequent notifications.
+- Enhanced logging for better transparency and debugging.
+- Improved error handling and notification mechanisms.
 
 Usage:
 Run this script with the required arguments:
@@ -37,7 +39,6 @@ Dependencies:
 Notes:
 - Ensure that the 'config.ini' file is properly configured.
 - Sensitive information like FTP credentials and Pushover tokens should be stored securely.
-
 """
 
 import os
@@ -48,8 +49,8 @@ import json
 import uuid
 import requests
 import psutil
-from subprocess import Popen
-from ftplib import FTP, error_perm, error_temp
+from subprocess import Popen, PIPE
+from ftplib import FTP, error_reply, error_temp, error_perm, error_proto
 import configparser
 from time import sleep, time
 from datetime import datetime
@@ -57,13 +58,22 @@ from dotenv import load_dotenv
 import shutil
 import gzip
 import itertools
-from threading import Thread
-import queue
+import signal
+from threading import Thread, Lock, Event
+import argparse
+from enum import Enum
+import math
+
+# -----------------------------------------------------------------------------
+# Dependency Management
+# -----------------------------------------------------------------------------
+# Ensure dependencies are installed via requirements.txt.
+# Avoid auto-installing within the script to prevent unexpected behaviors.
 
 # -----------------------------------------------------------------------------
 # Script Information
 # -----------------------------------------------------------------------------
-script_version = "v2.4.1"
+script_version = "v2.4.2"
 script_name = os.path.basename(__file__)
 environment = os.getenv('ENVIRONMENT', 'production')
 
@@ -100,15 +110,28 @@ log_file_path = os.path.join(log_dir, log_file_name)
 # Define a unique correlation ID for the script run
 correlation_id = str(uuid.uuid4())
 
-# Log Entry ID Counter
+# Log Entry ID Counter with thread safety
 entry_id_counter = itertools.count()
+counter_lock = Lock()
+
+# Enumerations for error types
+class ErrorType(Enum):
+    FTPConnectionError = "FTPConnectionError"
+    FileUploadError = "FileUploadError"
+    WebhookError = "WebhookError"
+    HighMemoryUsage = "HighMemoryUsage"
+    HighCPUUsage = "HighCPUUsage"
+    UnexpectedError = "UnexpectedError"
+    FileNotFoundError = "FileNotFoundError"
+    ConfigurationError = "ConfigurationError"
 
 # Custom JSON Formatter
 class JsonFormatter(logging.Formatter):
     def format(self, record):
-        # Generate a unique entry ID
-        record.entry_id = next(entry_id_counter)
-
+        # Generate a unique entry ID in a thread-safe manner
+        with counter_lock:
+            entry_id = next(entry_id_counter)
+        
         # Build the log record as a dictionary
         log_record = {
             'timestamp': self.formatTime(record, self.datefmt),
@@ -118,7 +141,7 @@ class JsonFormatter(logging.Formatter):
             'function': record.funcName,
             'line_no': record.lineno,
             'correlation_id': correlation_id,
-            'entry_id': record.entry_id,
+            'entry_id': entry_id,
             'environment': environment,
             'script_version': script_version,
         }
@@ -135,20 +158,34 @@ class JsonFormatter(logging.Formatter):
             log_record['attempt'] = record.attempt
         if hasattr(record, 'payload'):
             log_record['payload'] = record.payload
+        if hasattr(record, 'execution_time'):
+            log_record['execution_time'] = record.execution_time
+        if hasattr(record, 'status_code'):
+            log_record['status_code'] = record.status_code
+        if hasattr(record, 'response_text'):
+            log_record['response_text'] = record.response_text
+        if hasattr(record, 'retry_delay'):
+            log_record['retry_delay'] = record.retry_delay
+        if record.exc_info:
+            log_record['exception'] = self.formatException(record.exc_info)
         return json.dumps(log_record)
 
-# Custom Handler with Compression
+# Custom Handler with Compression and Error Handling
 from logging.handlers import TimedRotatingFileHandler
 
 class GzTimedRotatingFileHandler(TimedRotatingFileHandler):
     def doRollover(self):
-        super().doRollover()
-        if self.backupCount > 0:
-            for s in self.getFilesToDelete():
-                if os.path.exists(s):
-                    with open(s, 'rb') as f_in, gzip.open(f"{s}.gz", 'wb') as f_out:
-                        shutil.copyfileobj(f_in, f_out)
-                    os.remove(s)
+        try:
+            super().doRollover()
+            if self.backupCount > 0:
+                for s in self.getFilesToDelete():
+                    if os.path.exists(s):
+                        with open(s, 'rb') as f_in, gzip.open(f"{s}.gz", 'wb') as f_out:
+                            shutil.copyfileobj(f_in, f_out)
+                        os.remove(s)
+                        self.logger.info(f"Compressed and archived log file: {os.path.basename(s)}")
+        except Exception as e:
+            self.logger.error("Error during log rollover and compression", exc_info=True)
 
 # Configure logging
 logging_config = {
@@ -178,11 +215,6 @@ logging_config = {
     },
     # Configure loggers for third-party modules
     'loggers': {
-        '': {
-            'level': log_level.upper(),
-            'handlers': [],
-            'propagate': True,
-        },
         'requests': {
             'level': log_level.upper(),
             'handlers': [],
@@ -205,21 +237,24 @@ logger.info("Logging initialized.")
 # Error Notification Timestamps for Throttling
 # -----------------------------------------------------------------------------
 error_notification_timestamps = {}
+notification_lock = Lock()
 
 # -----------------------------------------------------------------------------
 # Function: send_pushover_notification
 # -----------------------------------------------------------------------------
 def send_pushover_notification(message, title="Notification", priority=0, sound=None, error_type=None):
     try:
-        cooldown_period = 300  # seconds
+        # Retrieve cooldown_period from config or use default
+        cooldown_period = config['ttd_audio_notification_Pushover'].getint('cooldown_period', fallback=300)  # seconds
         now = time()
         if error_type:
-            last_sent = error_notification_timestamps.get(error_type, 0)
-            if now - last_sent < cooldown_period:
-                logger.info(f"Notification for {error_type} suppressed to avoid overload.")
-                return
-            else:
-                error_notification_timestamps[error_type] = now
+            with notification_lock:
+                last_sent = error_notification_timestamps.get(error_type.value, 0)
+                if now - last_sent < cooldown_period:
+                    logger.info(f"Notification for {error_type.value} suppressed to avoid overload.")
+                    return
+                else:
+                    error_notification_timestamps[error_type.value] = now
 
         full_title = f"{script_name}: {title}"
 
@@ -229,7 +264,7 @@ def send_pushover_notification(message, title="Notification", priority=0, sound=
             'message': message,
             'title': full_title,
             'priority': priority,
-            'sound': sound or config['Validated']['sound']
+            'sound': sound or config['ttd_audio_notification_Pushover']['sound']
         }
 
         if priority == 2:
@@ -237,9 +272,14 @@ def send_pushover_notification(message, title="Notification", priority=0, sound=
             payload['retry'] = int(config['Validated']['retry'])
             payload['expire'] = int(config['Validated']['expire'])
 
+        logger.debug(f"Attempting to send Pushover notification: {title} - {message}")
         response = requests.post("https://api.pushover.net/1/messages.json", data=payload)
         response.raise_for_status()
-        logger.info("Pushover notification sent successfully")
+        logger.info("Pushover notification sent successfully", extra={'status_code': response.status_code, 'response_text': response.text})
+    except requests.exceptions.HTTPError as http_err:
+        logger.error(f"Pushover HTTP error occurred: {http_err}", exc_info=True)
+    except requests.exceptions.RequestException as req_err:
+        logger.error(f"Pushover request exception: {req_err}", exc_info=True)
     except Exception as e:
         logger.error("Failed to send Pushover notification", exc_info=True)
 
@@ -254,12 +294,12 @@ def cleanup_logs():
     # Gather all logs and their ages
     for filename in os.listdir(log_dir):
         file_path = os.path.join(log_dir, filename)
-        if os.path.isfile(file_path):
+        if os.path.isfile(file_path) and filename.endswith('.log'):
             file_age = now - os.path.getmtime(file_path)
             logs.append((file_path, file_age))
 
     # Sort logs by age (oldest first)
-    logs.sort(key=lambda x: x[1], reverse=False)
+    logs.sort(key=lambda x: x[1])
 
     # Get the current log file path to avoid deletion
     current_log_file = log_file_path
@@ -270,12 +310,16 @@ def cleanup_logs():
         if file_path == current_log_file:
             continue
         if file_age > max_log_days * 86400:
-            # Move the file to an archive directory
+            # Move the file to an archive directory atomically
             archive_dir = os.path.join(log_dir, 'archive')
             os.makedirs(archive_dir, exist_ok=True)
-            shutil.move(file_path, archive_dir)
-            logger.info(f"Archived old log file: {os.path.basename(file_path)}")
-            archived_files_count += 1
+            destination = os.path.join(archive_dir, os.path.basename(file_path))
+            try:
+                shutil.move(file_path, destination)
+                logger.info(f"Archived old log file: {os.path.basename(file_path)}")
+                archived_files_count += 1
+            except Exception as e:
+                logger.error(f"Failed to archive log file {file_path}", exc_info=True)
 
     # Re-evaluate logs after age-based cleanup
     logs = [(fp, fa) for fp, fa in logs if os.path.exists(fp)]
@@ -288,9 +332,13 @@ def cleanup_logs():
                 continue
             archive_dir = os.path.join(log_dir, 'archive')
             os.makedirs(archive_dir, exist_ok=True)
-            shutil.move(logs[i][0], archive_dir)
-            logger.info(f"Archived excess log file: {os.path.basename(logs[i][0])}")
-            archived_files_count += 1
+            destination = os.path.join(archive_dir, os.path.basename(logs[i][0]))
+            try:
+                shutil.move(logs[i][0], destination)
+                logger.info(f"Archived excess log file: {os.path.basename(logs[i][0])}")
+                archived_files_count += 1
+            except Exception as e:
+                logger.error(f"Failed to archive log file {logs[i][0]}", exc_info=True)
 
     if archived_files_count == 0:
         logger.info("No old or excess log files were found for archiving.")
@@ -298,9 +346,6 @@ def cleanup_logs():
         logger.info(f"Archived {archived_files_count} old or excess log file(s).")
 
     send_pushover_notification("Log cleanup completed.", title="Maintenance", priority=-1)
-
-# Now that logging is configured, run cleanup
-cleanup_logs()
 
 # -----------------------------------------------------------------------------
 # Custom Exception Definitions
@@ -320,29 +365,11 @@ class WebhookError(Exception):
 # -----------------------------------------------------------------------------
 # Function: log_and_validate_config
 # -----------------------------------------------------------------------------
+import re
+
 def log_and_validate_config():
     try:
         logger.info("Starting configuration validation...")
-
-        # FTP settings
-        ftp_server = os.getenv('FTP_SERVER') or config['ttd_audio_notification_ftp']['ftp_server']
-        ftp_port = os.getenv('FTP_PORT') or config['ttd_audio_notification_ftp']['ftp_port']
-        ftp_user = os.getenv('FTP_USER') or config['ttd_audio_notification_ftp']['ftp_user']
-        ftp_pass = os.getenv('FTP_PASS') or config['ttd_audio_notification_ftp']['ftp_pass']
-
-        # Logging these values for debugging (avoid sensitive info)
-        logger.debug(f"FTP Server: {ftp_server}, FTP Port: {ftp_port}, FTP User: {ftp_user}")
-
-        # Validate FTP settings
-        if not ftp_server or not ftp_port or not ftp_user or not ftp_pass:
-            raise ValueError("FTP configuration missing or incomplete in .env or config.ini")
-
-        # Base path for audio files
-        base_path = config['ttd_audio_notification_Path']['base_path']
-        logger.debug(f"Base Path: {base_path}")
-
-        if not base_path:
-            raise ValueError("Base path for audio files is missing in config.ini")
 
         # Pushover settings
         pushover_token = os.getenv('PUSHOVER_TOKEN') or config['ttd_audio_notification_Pushover']['pushover_token']
@@ -351,13 +378,65 @@ def log_and_validate_config():
         retry = config['ttd_audio_notification_Pushover'].getint('retry')
         expire = config['ttd_audio_notification_Pushover'].getint('expire')
         sound = config['ttd_audio_notification_Pushover']['sound']
+        cooldown_period = config['ttd_audio_notification_Pushover'].getint('cooldown_period', fallback=300)
 
-        # Log these values
+        # Log non-sensitive Pushover settings
         logger.debug(f"Pushover User: {pushover_user}")
 
         # Validate Pushover settings
         if not pushover_token or not pushover_user:
             raise ValueError("Pushover configuration missing or incomplete in .env or config.ini")
+
+        # Validate priority, retry, expire
+        if priority not in [-2, -1, 0, 1, 2]:
+            raise ValueError("Pushover priority must be between -2 and 2.")
+
+        if retry <= 0 or expire <= 0:
+            raise ValueError("Pushover retry and expire must be positive integers.")
+
+        # Webhook settings
+        if config.has_option('ttd_audio_notification_Webhook', 'ttd_audio_received_url'):
+            webhook_url = config['ttd_audio_notification_Webhook']['ttd_audio_received_url']
+            if not re.match(r'^https?://', webhook_url):
+                raise ValueError("Webhook URL must start with http:// or https://")
+        else:
+            raise ValueError("Webhook URL is missing in config.ini")
+
+        # Retry delay for webhook
+        retry_delay = config['ttd_audio_notification_Webhook'].getint('retry_delay', fallback=5)
+        if retry_delay <= 0:
+            raise ValueError("Retry delay must be a positive integer.")
+
+        # Base audio URL
+        if config.has_option('ttd_audio_notification_Webhook', 'base_audio_url'):
+            base_audio_url = config['ttd_audio_notification_Webhook']['base_audio_url']
+            if not re.match(r'^https?://', base_audio_url):
+                raise ValueError("Base audio URL must start with http:// or https://")
+        else:
+            raise ValueError("Base audio URL is missing in config.ini")
+
+        # FTP settings
+        ftp_server = os.getenv('FTP_SERVER') or config['ttd_audio_notification_ftp']['ftp_server']
+        ftp_port = os.getenv('FTP_PORT') or config['ttd_audio_notification_ftp']['ftp_port']
+        ftp_user = os.getenv('FTP_USER') or config['ttd_audio_notification_ftp']['ftp_user']
+        ftp_pass = os.getenv('FTP_PASS') or config['ttd_audio_notification_ftp']['ftp_pass']
+
+        # Log non-sensitive FTP settings
+        logger.debug(f"FTP Server: {ftp_server}, FTP Port: {ftp_port}, FTP User: {ftp_user}")
+
+        # Validate FTP settings
+        if not ftp_server or not ftp_port or not ftp_user or not ftp_pass:
+            raise ValueError("FTP configuration missing or incomplete in .env or config.ini")
+
+        if not re.match(r'^\d+$', ftp_port):
+            raise ValueError("FTP port must be a number.")
+
+        # Base path for audio files
+        base_path = config['ttd_audio_notification_Path']['base_path']
+        logger.debug(f"Base Path: {base_path}")
+
+        if not base_path or not os.path.isdir(base_path):
+            raise ValueError("Base path for audio files is missing or invalid in config.ini")
 
         # Store validated values in 'Validated' section
         config['Validated'] = {
@@ -371,27 +450,46 @@ def log_and_validate_config():
             'priority': str(priority),
             'retry': str(retry),
             'expire': str(expire),
-            'sound': sound
+            'sound': sound,
+            'webhook_url': webhook_url,
+            'base_audio_url': base_audio_url,
+            'retry_delay': str(retry_delay),
+            'cooldown_period': str(cooldown_period)
         }
+
+        logger.debug("Configuration validation completed successfully.")
+        logger.debug(f"Validated Configuration: {', '.join(config['Validated'].keys())}")
 
     except Exception as e:
         logger.error("Configuration validation failed", exc_info=True)
         raise
 
 # -----------------------------------------------------------------------------
-# Function: connect_to_ftp
+# Function: connect_to_ftp_with_retries
 # -----------------------------------------------------------------------------
 def connect_to_ftp():
     try:
         logger.debug("Connecting to FTP server")
         ftp = FTP()
-        ftp.connect(config['Validated']['ftp_server'], int(config['Validated']['ftp_port']))
+        ftp.connect(config['Validated']['ftp_server'], int(config['Validated']['ftp_port']), timeout=30)
         ftp.login(config['Validated']['ftp_user'], config['Validated']['ftp_pass'])
         logger.info("Connected to FTP server", extra={'ftp_server': config['Validated']['ftp_server']})
         return ftp
-    except Exception as e:
+    except (error_reply, error_temp, error_perm, error_proto) as ftp_exc:
         logger.error("FTP connection error", exc_info=True)
-        raise FTPConnectionError(f"FTP error: {e}")
+        raise FTPConnectionError(f"FTP error: {ftp_exc}")
+
+def connect_to_ftp_with_retries(max_retries=3, backoff_factor=2):
+    attempt = 0
+    while attempt < max_retries:
+        try:
+            return connect_to_ftp()
+        except FTPConnectionError as e:
+            wait_time = backoff_factor ** attempt
+            logger.warning(f"FTP connection attempt {attempt + 1} failed. Retrying in {wait_time} seconds...")
+            sleep(wait_time)
+            attempt += 1
+    raise FTPConnectionError(f"Failed to connect to FTP after {max_retries} attempts.")
 
 # -----------------------------------------------------------------------------
 # Function: store_file
@@ -403,8 +501,11 @@ def store_file(ftp, local_file, department):
             logger.debug("Uploading file", extra={'file_name': file_name})
             ftp.storbinary(f'STOR {file_name}', f)
             logger.info("Uploaded file to FTP server", extra={'file_name': file_name})
-            send_webhook(file_name, department)
+            # Send webhook asynchronously
+            webhook_thread = Thread(target=send_webhook, args=(file_name, department), daemon=True)
+            webhook_thread.start()
     except Exception as e:
+        file_name = os.path.basename(local_file)
         logger.error("Failed to upload to FTP server", exc_info=True, extra={'file_name': file_name})
         raise FileUploadError(f"Failed to upload to FTP server: {e}")
 
@@ -414,16 +515,13 @@ def store_file(ftp, local_file, department):
 def upload_to_ftp(local_file, department):
     """Uploads a file to the FTP server and handles FTP-specific errors."""
     try:
-        ftp = connect_to_ftp()
+        ftp = connect_to_ftp_with_retries()
         if ftp:
             try:
                 store_file(ftp, local_file, department)
             finally:
                 ftp.quit()
                 logger.info("FTP connection closed")
-                # Send success notification after upload and webhook
-                message = f"Successfully processed and uploaded {os.path.basename(local_file)} for {department}."
-                send_pushover_notification(message, title="Task Completed", priority=-2, sound='magic')
     except FTPConnectionError as ftp_error:
         message = (
             f"FTPConnectionError at {datetime.now()}: {ftp_error}\n"
@@ -431,7 +529,7 @@ def upload_to_ftp(local_file, department):
             "Action: Check FTP server status and network connectivity."
         )
         logger.error("FTPConnectionError occurred", exc_info=True)
-        send_pushover_notification(message, title="FTP Error", priority=1, sound='siren', error_type='FTPConnectionError')
+        send_pushover_notification(message, title="FTP Error", priority=1, sound='siren', error_type=ErrorType.FTPConnectionError)
         raise FileUploadError(f"Failed to upload to FTP server: {ftp_error}")
     except FileUploadError as file_error:
         message = (
@@ -440,7 +538,7 @@ def upload_to_ftp(local_file, department):
             "Action: Verify file access and network connectivity."
         )
         logger.error("FileUploadError occurred", exc_info=True)
-        send_pushover_notification(message, title="File Upload Error", priority=1, sound='alien', error_type='FileUploadError')
+        send_pushover_notification(message, title="File Upload Error", priority=1, sound='alien', error_type=ErrorType.FileUploadError)
         raise file_error
 
 # -----------------------------------------------------------------------------
@@ -449,10 +547,27 @@ def upload_to_ftp(local_file, department):
 def run_transcription_script(mp3_file, department):
     try:
         transcription_script = os.path.join(script_dir, 'ttd_transcribed.py')
-        Popen([sys.executable, transcription_script, mp3_file, department])  # Non-blocking call
-        logger.info("Started transcription script", extra={'file_name': mp3_file})
+        process = Popen([sys.executable, transcription_script, mp3_file, department], stdout=PIPE, stderr=PIPE)
+        logger.info("Started transcription script", extra={'file_name': mp3_file, 'pid': process.pid})
+        
+        # Start a thread to monitor the process
+        monitor_thread = Thread(target=monitor_transcription_process, args=(process, mp3_file), daemon=True)
+        monitor_thread.start()
     except Exception as e:
         logger.error("Failed to start transcription script", exc_info=True, extra={'file_name': mp3_file})
+        send_pushover_notification(f"Failed to start transcription script for {mp3_file}.", title="Transcription Error", priority=1, sound='bugle', error_type=ErrorType.UnexpectedError)
+
+def monitor_transcription_process(process, mp3_file):
+    try:
+        stdout, stderr = process.communicate()
+        if process.returncode != 0:
+            logger.error("Transcription script failed", extra={'file_name': mp3_file, 'return_code': process.returncode, 'stderr': stderr.decode().strip()})
+            send_pushover_notification(f"Transcription script failed for {mp3_file}. Error: {stderr.decode().strip()}", title="Transcription Error", priority=1, sound='alien', error_type=ErrorType.UnexpectedError)
+        else:
+            logger.info("Transcription script completed successfully", extra={'file_name': mp3_file, 'stdout': stdout.decode().strip()})
+    except Exception as e:
+        logger.error("Error while monitoring transcription script", exc_info=True, extra={'file_name': mp3_file})
+        send_pushover_notification(f"Error while monitoring transcription script for {mp3_file}.", title="Transcription Monitoring Error", priority=1, sound='alien', error_type=ErrorType.UnexpectedError)
 
 # -----------------------------------------------------------------------------
 # Function: send_webhook
@@ -464,7 +579,7 @@ def send_webhook(file_name, topic, retries=3):
             raise KeyError("Webhook configuration missing")
 
         file_name = os.path.basename(file_name)
-        base_audio_url = config['ttd_audio_notification_Webhook']['base_audio_url']
+        base_audio_url = config['Validated']['base_audio_url']
         file_url = f"{base_audio_url}{file_name}"
 
         payload = {
@@ -476,35 +591,38 @@ def send_webhook(file_name, topic, retries=3):
         }
 
         attempt = 0
-        retry_delay = config['ttd_audio_notification_Retry'].getint('retry_delay')
-
-        timeout_seconds = config['ttd_audio_notification_Webhook'].getint('timeout_seconds')
+        retry_delay = int(config['Validated']['retry_delay'])
+        timeout_seconds = int(config['ttd_audio_notification_Webhook']['timeout_seconds'])
 
         while attempt < retries:
             try:
                 logger.debug("Sending webhook", extra={'attempt': attempt + 1, 'payload': payload})
-                response = requests.post(config['ttd_audio_notification_Webhook']['ttd_audio_received_url'],
-                                         json=payload, timeout=timeout_seconds)
+                response = requests.post(config['Validated']['webhook_url'], json=payload, timeout=timeout_seconds)
                 response.raise_for_status()
-                logger.info("Webhook sent successfully", extra={'payload': payload})
+                logger.info("Webhook sent successfully", extra={'status_code': response.status_code, 'response_text': response.text, 'payload': payload})
                 return True
-
             except requests.exceptions.RequestException as e:
                 logger.warning("Webhook attempt failed", exc_info=True, extra={'attempt': attempt + 1})
                 attempt += 1
                 if attempt < retries:
-                    logger.info("Retrying webhook", extra={'retry_delay': retry_delay})
-                    sleep(retry_delay)
+                    backoff_time = retry_delay * math.pow(2, attempt - 1)  # Exponential backoff
+                    logger.info(f"Retrying webhook in {backoff_time} seconds", extra={'retry_delay': backoff_time})
+                    sleep(backoff_time)
 
+        # After all retries have failed
         message = (
             f"WebhookError at {datetime.now()}: Failed after {retries} attempts.\n"
             "Possible causes: Node-RED server down, network issues.\n"
             "Action: Check Node-RED server status and verify the webhook URL."
         )
         logger.error("Webhook failed after all retries")
-        send_pushover_notification(message, title="Webhook Error", priority=1, sound='tugboat', error_type='WebhookError')
+        send_pushover_notification(message, title="Webhook Error", priority=1, sound='tugboat', error_type=ErrorType.WebhookError)
         raise WebhookError(f"Webhook failed after {retries} attempts.")
 
+    except KeyError as ke:
+        logger.error(f"Configuration error in webhook setup: {ke}", exc_info=True)
+        send_pushover_notification(f"Configuration error in webhook setup: {ke}", title="Webhook Configuration Error", priority=1, sound='siren', error_type=ErrorType.ConfigurationError)
+        raise
     except Exception as e:
         logger.error("Webhook error occurred", exc_info=True)
         raise
@@ -512,32 +630,71 @@ def send_webhook(file_name, topic, retries=3):
 # -----------------------------------------------------------------------------
 # Function: performance_monitor
 # -----------------------------------------------------------------------------
-def performance_monitor():
-    """Logs CPU and memory usage."""
-    memory_usage = psutil.virtual_memory().percent
-    cpu_usage = psutil.cpu_percent()
-    logger.info("Performance metrics", extra={'memory_usage': memory_usage, 'cpu_usage': cpu_usage})
-    # Optionally, send notifications if usage exceeds thresholds
-    if memory_usage > 80:
-        send_pushover_notification(f"High Memory Usage: {memory_usage}%", title="Resource Alert", priority=1, sound='gamelan', error_type='HighMemoryUsage')
-    if cpu_usage > 90:
-        send_pushover_notification(f"High CPU Usage: {cpu_usage}%", title="Resource Alert", priority=1, sound='gamelan', error_type='HighCPUUsage')
+def performance_monitor(stop_event):
+    """Logs CPU and memory usage periodically."""
+    memory_threshold = config['ttd_audio_notification_Performance'].getint('memory_threshold')
+    cpu_threshold = config['ttd_audio_notification_Performance'].getint('cpu_threshold')
+    interval = config['ttd_audio_notification_Performance'].getint('monitor_interval')  # in seconds
+
+    while not stop_event.is_set():
+        try:
+            memory_usage = psutil.virtual_memory().percent
+            cpu_usage = psutil.cpu_percent(interval=1)
+            logger.info("Performance metrics", extra={'memory_usage': memory_usage, 'cpu_usage': cpu_usage})
+
+            # Send notifications if usage exceeds thresholds
+            if memory_usage > memory_threshold:
+                send_pushover_notification(f"High Memory Usage: {memory_usage}%", title="Resource Alert", priority=1, sound='gamelan', error_type=ErrorType.HighMemoryUsage)
+            if cpu_usage > cpu_threshold:
+                send_pushover_notification(f"High CPU Usage: {cpu_usage}%", title="Resource Alert", priority=1, sound='gamelan', error_type=ErrorType.HighCPUUsage)
+        except Exception as e:
+            logger.error("Error in performance monitoring", exc_info=True)
+        sleep(interval)
+
+# -----------------------------------------------------------------------------
+# Function: parse_arguments
+# -----------------------------------------------------------------------------
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='Process TTD audio notifications.')
+    parser.add_argument('audio_file', type=str, help='Name of the audio file.')
+    parser.add_argument('department', type=str, help='Name of the department.')
+    return parser.parse_args()
+
+# -----------------------------------------------------------------------------
+# Graceful Shutdown Handler
+# -----------------------------------------------------------------------------
+def shutdown_handler(signum, frame):
+    logger.info(f"Received shutdown signal ({signum}). Shutting down gracefully...")
+    global stop_event
+    stop_event.set()
 
 # -----------------------------------------------------------------------------
 # Main Execution
 # -----------------------------------------------------------------------------
 def main():
+    global stop_event
     logger.debug("Starting script execution")
     start_time = time()
+
+    # Setup graceful shutdown
+    stop_event = Event()
+    signal.signal(signal.SIGINT, shutdown_handler)
+    signal.signal(signal.SIGTERM, shutdown_handler)
+
+    # Start performance monitoring thread
+    perf_thread = Thread(target=performance_monitor, args=(stop_event,), daemon=True)
+    perf_thread.start()
 
     try:
         log_and_validate_config()
 
-        if len(sys.argv) != 3:
-            raise ValueError(f"Expected 2 arguments (audio file and department), got {len(sys.argv) - 1}")
+        args = parse_arguments()
+        mp3_file = os.path.join(config['Validated']['base_path'], args.audio_file)
+        department = args.department
 
-        mp3_file = os.path.join(config['Validated']['base_path'], sys.argv[1])
-        department = sys.argv[2]
+        if not os.path.isfile(mp3_file):
+            raise FileNotFoundError(f"Audio file '{mp3_file}' does not exist.")
+
         logger.info("Processing file", extra={'file_name': mp3_file, 'department': department})
 
         # Run the transcription script asynchronously
@@ -546,16 +703,36 @@ def main():
         # Upload to FTP
         upload_to_ftp(mp3_file, department)
 
+    except FileNotFoundError as fnf_error:
+        logger.error("File not found error", exc_info=True)
+        try:
+            send_pushover_notification(str(fnf_error), title="File Not Found", priority=1, sound='bugle', error_type=ErrorType.FileNotFoundError)
+        except Exception as e:
+            logger.error("Failed to send Pushover notification for File Not Found error", exc_info=True)
+        sys.exit(2)
+    except ValueError as ve:
+        logger.error("Value error", exc_info=True)
+        try:
+            send_pushover_notification(str(ve), title="Configuration Error", priority=1, sound='bugle', error_type=ErrorType.ConfigurationError)
+        except Exception as e:
+            logger.error("Failed to send Pushover notification for Configuration Error", exc_info=True)
+        sys.exit(3)
     except Exception as e:
-        logger.error("An error occurred in main execution", exc_info=True)
-        message = f"An unexpected error occurred at {datetime.now()}: {e}\nAction: Check logs for details."
-        send_pushover_notification(message, title="Unexpected Error", priority=1, sound='falling', error_type='UnexpectedError')
-
+        logger.error("An unexpected error occurred in main execution", exc_info=True)
+        try:
+            message = f"An unexpected error occurred at {datetime.now()}: {e}\nAction: Check logs for details."
+            send_pushover_notification(message, title="Unexpected Error", priority=1, sound='falling', error_type=ErrorType.UnexpectedError)
+        except Exception as inner_e:
+            logger.error("Failed to send Pushover notification for Unexpected Error", exc_info=True)
+        sys.exit(1)
     finally:
         execution_time = time() - start_time
         logger.info("Script completed", extra={'execution_time': execution_time})
-        performance_monitor()
+        cleanup_logs()
         logger.debug("Exiting script")
+        if stop_event and not stop_event.is_set():
+            stop_event.set()
+        sys.exit(0)
 
 if __name__ == "__main__":
     main()
